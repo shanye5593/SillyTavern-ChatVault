@@ -497,6 +497,8 @@ function viewByCharacter() {
         groups.push({ character: c, chats: list });
     }
     return groups.sort((a, b) => {
+        // 先按聊天数倒序（防止 0/1 条的角色抢位置），同数再按最新一条时间倒序
+        if (b.chats.length !== a.chats.length) return b.chats.length - a.chats.length;
         const ta = a.chats[0] ? timestampOf(a.chats[0]) : 0;
         const tb = b.chats[0] ? timestampOf(b.chats[0]) : 0;
         return tb - ta;
