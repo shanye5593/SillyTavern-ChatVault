@@ -483,6 +483,9 @@ function closePanel() {
     if (previewObserver) { previewObserver.disconnect(); previewObserver = null; }
     if (panelEl) { panelEl.remove(); panelEl = null; }
     document.removeEventListener('keydown', escHandler);
+    // 关闭面板时清空搜索词，避免下次打开时旧搜索仍然生效但输入框为空
+    searchQuery = '';
+    currentPage = 1;
 }
 
 function switchTab(tab) {
