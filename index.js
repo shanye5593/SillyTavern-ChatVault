@@ -924,7 +924,7 @@ function openEditModal(character, fileName) {
             </div>
             <div class="cv-field">
                 <label>标签（用逗号分隔）</label>
-                <input type="text" id="cv_m_tags" value="${escapeHtml(tags.join(', '))}" placeholder="例如：甜文, 现代AU, 重要" />
+                <input type="text" id="cv_m_tags" value="${escapeHtml(tags.join(', '))}" placeholder="例如：史诗, 现代AU, 重要" />
             </div>
             <div class="cv-field">
                 <label>原始文件名</label>
