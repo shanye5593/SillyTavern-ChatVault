@@ -231,11 +231,11 @@ function openPanel() {
                 <h2>📚 聊天记录管理器</h2>
                 <input type="text" class="chatvault-search" id="cv_search" placeholder="搜索角色名或聊天名…" />
                 <div class="chatvault-toolbar">
-                    <button id="cv_only_starred">⭐ 仅看收藏</button>
-                    <button id="cv_expand_all">展开全部</button>
-                    <button id="cv_collapse_all">收起全部</button>
-                    <button id="cv_refresh">🔄 刷新</button>
-                    <button id="chatvault_close">✕</button>
+                    <button id="cv_only_starred" title="仅看收藏">⭐<span class="cv-btn-label"> 仅看收藏</span></button>
+                    <button id="cv_expand_all" title="展开全部">▼<span class="cv-btn-label"> 展开</span></button>
+                    <button id="cv_collapse_all" title="收起全部">▶<span class="cv-btn-label"> 收起</span></button>
+                    <button id="cv_refresh" title="刷新">🔄<span class="cv-btn-label"> 刷新</span></button>
+                    <button id="chatvault_close" title="关闭">✕</button>
                 </div>
             </div>
             <div class="chatvault-status" id="cv_status">准备就绪</div>
