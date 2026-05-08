@@ -1,10 +1,10 @@
 /**
  * SillyTavern ChatVault — 全局聊天档案管理器
- * v0.2.1 — 四 tab（新增「当前角色」）+ 自定义标题 + 标签 + 最后消息预览
+ * v0.2.2 — 四 tab + 导出 jsonl/txt（可剥离思考标签）+ 当前角色导入
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -13,7 +13,17 @@ const THEMES = [
     { id: 'light',  name: '白底 Light' },
     { id: 'coffee', name: '咖啡 Coffee' },
 ];
-const DEFAULT_SETTINGS = { enabled: true, theme: 'dark' };
+const DEFAULT_SETTINGS = {
+    enabled: true,
+    theme: 'dark',
+    // 导出 txt 时的剥离规则（默认全关，用户需自己开）
+    strip: {
+        thinking: false,        // <thinking>...</thinking>
+        think: false,           // <think>...</think>
+        htmlComment: false,     // <!-- ... -->
+        custom: [],             // [{open: '<details>', close: '</details>'}, ...]
+    },
+};
 
 function loadSettings() {
     try {
@@ -410,6 +420,8 @@ const ICONS = {
     chevL: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>`,
     chevR: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>`,
     plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+    download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+    upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
 };
 
 /* ============================================================
@@ -696,6 +708,9 @@ function render() {
                 <img class="cv-group-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
                 <span class="cv-group-name">${escapeHtml(curChar.name || '(无名)')}</span>
                 <span class="cv-group-count">共 ${(chatsByAvatar[curChar.avatar] || []).length} 条聊天</span>
+                <button class="cv-group-newchat" id="cv_current_import" title="从 jsonl 文件导入到当前角色">
+                    ${ICONS.upload}<span>导入</span>
+                </button>
                 <button class="cv-group-newchat" id="cv_current_newchat" title="为该角色新建聊天">
                     ${ICONS.plus}<span>新建聊天</span>
                 </button>
@@ -717,7 +732,7 @@ function render() {
         bindCardEvents();
         observePreviews();
     }
-    // 绑定「当前角色」头部的新建聊天按钮
+    // 绑定「当前角色」头部的新建聊天 / 导入按钮
     if (activeTab === 'current' && curChar) {
         const newBtn = document.getElementById('cv_current_newchat');
         if (newBtn) {
@@ -725,6 +740,22 @@ function render() {
                 ev.stopPropagation();
                 if (!confirm(`为「${curChar.name || '角色'}」新建一个聊天？\n\n会切换到该角色并开始全新对话。`)) return;
                 newChatFor(curChar);
+            };
+        }
+        const impBtn = document.getElementById('cv_current_import');
+        if (impBtn) {
+            impBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                const inp = document.createElement('input');
+                inp.type = 'file';
+                inp.accept = '.jsonl,application/x-jsonlines';
+                inp.onchange = () => {
+                    const f = inp.files?.[0];
+                    if (!f) return;
+                    if (!confirm(`导入文件「${f.name}」到「${curChar.name || '当前角色'}」？\n\n会作为该角色的新聊天加入档案。`)) return;
+                    importChatToCharacter(curChar, f);
+                };
+                inp.click();
             };
         }
     }
@@ -807,11 +838,6 @@ function renderCard(character, chat, hideCharName = false) {
     const sizeStr = chat.file_size ? fmtSize(chat.file_size) : '';
     const timeStr = fmtRelTime(chat.last_mes);
 
-    const charLabel = hideCharName ? '' : `
-        <span class="cv-character">${highlight(character.name || '', searchQuery)}</span>
-        <span class="cv-dot"></span>
-    `;
-
     const meta1 = [
         msgCount !== null ? `<span class="cv-meta">${ICONS.msg} ${msgCount} 条</span>` : '',
         sizeStr ? `<span class="cv-meta">${ICONS.file} ${escapeHtml(sizeStr)}</span>` : '',
@@ -822,21 +848,25 @@ function renderCard(character, chat, hideCharName = false) {
         ? `<span class="cv-meta-sep"></span><div class="cv-tags">${tags.map(t => `<span class="cv-tag">${highlight(t, searchQuery)}</span>`).join('')}</div>`
         : '';
 
+    // 第二行小字：角色名（在「按角色」/「当前角色」tab 隐藏）
+    const subLine = hideCharName ? '' : `
+        <div class="cv-card-subline">
+            <span class="cv-character">${highlight(character.name || '', searchQuery)}</span>
+        </div>
+    `;
+
     return `
         <div class="cv-card" data-avatar="${escapeHtml(character.avatar)}" data-file="${escapeHtml(chat.file_name)}">
             <img class="cv-card-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
             <div class="cv-card-main">
                 <div class="cv-card-row">
                     <div class="cv-card-titleblock">
-                        <div class="cv-card-toprow">
-                            ${charLabel}
-                            <h3 class="cv-title ${titleClass}">${highlight(displayTitle, searchQuery)}</h3>
-                        </div>
-                        <div class="cv-filename">${escapeHtml(withExt(chat.file_name))}</div>
+                        <h3 class="cv-title ${titleClass}">${highlight(displayTitle, searchQuery)}</h3>
+                        ${subLine}
                     </div>
                     <div class="cv-actions">
                         <button class="cv-act cv-star ${starred ? 'is-on' : ''}" data-act="star" title="收藏">${ICONS.star}</button>
-                        <button class="cv-act" data-act="edit" title="编辑标题/标签">${ICONS.edit}</button>
+                        <button class="cv-act" data-act="edit" title="编辑标题/标签/导出">${ICONS.edit}</button>
                         <button class="cv-act cv-act-delete" data-act="delete" title="删除">${ICONS.trash}</button>
                         <span class="cv-act-divider"></span>
                         <button class="cv-act cv-act-jump" data-act="open" title="跳转到此聊天"><span>继续</span>${ICONS.jump}</button>
@@ -976,13 +1006,164 @@ function observePreviews() {
 }
 
 /* ============================================================
- *  编辑 modal （自定义标题 + 标签 + 重命名文件名）
+ *  导出 / 导入
+ * ============================================================ */
+
+// 拉一份完整聊天数组：[metadata, ...messages]
+async function fetchFullChat(character, fileName) {
+    const bodies = [
+        { ch_name: character.name, file_name: stripExt(fileName), avatar_url: character.avatar, force: true },
+        { avatar_url: character.avatar, file_name: withExt(fileName), force: true },
+        { ch_name: character.name, file_name: stripExt(fileName), avatar_url: character.avatar },
+    ];
+    for (const body of bodies) {
+        try {
+            const res = await fetch('/api/chats/get', {
+                method: 'POST', headers: headers(), body: JSON.stringify(body),
+            });
+            if (!res.ok) continue;
+            const data = await res.json();
+            const arr = Array.isArray(data) ? data : (data?.chat || []);
+            if (arr.length) return arr;
+        } catch { /* try next */ }
+    }
+    throw new Error('无法读取聊天内容');
+}
+
+function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+// 按设置剥离 message text
+function applyStripping(text, strip) {
+    if (typeof text !== 'string' || !text) return text || '';
+    let out = text;
+    if (strip.thinking) out = out.replace(/<thinking[^>]*>[\s\S]*?<\/thinking>/gi, '');
+    if (strip.think)    out = out.replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '');
+    if (strip.htmlComment) out = out.replace(/<!--[\s\S]*?-->/g, '');
+    if (Array.isArray(strip.custom)) {
+        for (const pair of strip.custom) {
+            if (!pair || !pair.open || !pair.close) continue;
+            const re = new RegExp(escapeRegex(pair.open) + '[\\s\\S]*?' + escapeRegex(pair.close), 'g');
+            out = out.replace(re, '');
+        }
+    }
+    // 去多余空行
+    return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 0);
+}
+
+async function exportChatJsonl(character, fileName) {
+    setStatus('正在导出 jsonl…');
+    try {
+        const arr = await fetchFullChat(character, fileName);
+        const text = arr.map(o => JSON.stringify(o)).join('\n') + '\n';
+        const safeName = stripExt(fileName).replace(/[\\/:*?"<>|]/g, '_');
+        downloadBlob(new Blob([text], { type: 'application/x-jsonlines' }), `${safeName}.jsonl`);
+        setStatus('✓ 已导出 jsonl');
+    } catch (e) {
+        setStatus(`❌ 导出失败: ${e.message}`);
+        toastr.error(`导出失败: ${e.message}`);
+    }
+}
+
+async function exportChatTxt(character, fileName) {
+    setStatus('正在导出 txt…');
+    try {
+        const arr = await fetchFullChat(character, fileName);
+        const strip = loadSettings().strip || DEFAULT_SETTINGS.strip;
+        const meta = arr[0] || {};
+        const userName = meta.user_name || '用户';
+        const charName = character.name || meta.character_name || '角色';
+        const lines = [`# ${charName} × ${userName}`, `# 来源: ${withExt(fileName)}`, ''];
+        for (let i = 1; i < arr.length; i++) {
+            const m = arr[i];
+            if (!m || typeof m.mes !== 'string') continue;
+            const who = m.is_user ? userName : (m.name || charName);
+            const cleaned = applyStripping(m.mes, strip);
+            if (!cleaned) continue;
+            lines.push(`【${who}】`);
+            lines.push(cleaned);
+            lines.push('');
+        }
+        const safeName = stripExt(fileName).replace(/[\\/:*?"<>|]/g, '_');
+        downloadBlob(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }), `${safeName}.txt`);
+        setStatus('✓ 已导出 txt');
+    } catch (e) {
+        setStatus(`❌ 导出失败: ${e.message}`);
+        toastr.error(`导出失败: ${e.message}`);
+    }
+}
+
+async function importChatToCharacter(character, file) {
+    if (!character?.avatar) { toastr.error('当前没有选中角色'); return; }
+    if (!file) return;
+    const isJsonl = /\.jsonl$/i.test(file.name);
+    if (!isJsonl) {
+        toastr.error('只支持 .jsonl 文件（酒馆原生格式）');
+        return;
+    }
+    setStatus('正在导入…');
+    try {
+        const ctx = SillyTavern.getContext();
+        const userName = ctx.name1 || ctx.user?.name || 'User';
+        const fd = new FormData();
+        fd.append('avatar_url', character.avatar);
+        fd.append('file_type', 'jsonl');
+        fd.append('user_name', userName);
+        fd.append('avatar', file, file.name);   // ST 历史上字段名是 'avatar'
+        fd.append('file', file, file.name);     // 兜底也带一个 'file'
+
+        const reqHeaders = headers();
+        // multipart 不能手动设 Content-Type
+        delete reqHeaders['Content-Type'];
+        delete reqHeaders['content-type'];
+
+        const res = await fetch('/api/chats/import', { method: 'POST', headers: reqHeaders, body: fd });
+        if (!res.ok) {
+            const txt = await res.text().catch(() => '');
+            throw new Error(`HTTP ${res.status} ${txt.slice(0, 120)}`);
+        }
+        toastr.success(`已导入到「${character.name || '当前角色'}」`);
+        setStatus('✓ 已导入');
+        // 刷新该角色的聊天列表
+        await reloadCharacterChats(character);
+        render();
+    } catch (e) {
+        console.error('[ChatVault] 导入失败', e);
+        setStatus(`❌ 导入失败: ${e.message}`);
+        toastr.error(`导入失败: ${e.message}`);
+    }
+}
+
+async function reloadCharacterChats(character) {
+    try {
+        const res = await fetch('/api/characters/chats', {
+            method: 'POST', headers: headers(),
+            body: JSON.stringify({ avatar_url: character.avatar }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : (data ? Object.values(data) : []);
+        chatsByAvatar[character.avatar] = list;
+    } catch { /* 忽略 */ }
+}
+
+/* ============================================================
+ *  编辑 modal （自定义标题 + 标签 + 重命名文件名 + 导出）
  * ============================================================ */
 
 function openEditModal(character, fileName) {
     const meta = getMetaFor(character.avatar, fileName);
     const customTitle = meta.customTitle || '';
     const tags = Array.isArray(meta.tags) ? meta.tags : [];
+    const stripCfg = { ...DEFAULT_SETTINGS.strip, ...(loadSettings().strip || {}) };
 
     closeModal();
     const wrap = document.createElement('div');
@@ -1005,6 +1186,25 @@ function openEditModal(character, fileName) {
                 <input type="text" id="cv_m_file" value="${escapeHtml(fileName)}" />
                 <div class="cv-field-hint">修改这里会真正在服务器上重命名文件</div>
             </div>
+
+            <div class="cv-section-divider"></div>
+            <div class="cv-field">
+                <label>导出聊天</label>
+                <div class="cv-export-row">
+                    <button class="cv-btn" id="cv_m_export_jsonl" type="button">${ICONS.download}<span>jsonl（原汁原味）</span></button>
+                    <button class="cv-btn" id="cv_m_export_txt" type="button">${ICONS.download}<span>txt（人类可读）</span></button>
+                </div>
+                <div class="cv-strip-box">
+                    <div class="cv-strip-title">导出 txt 时剥离以下标签内的内容（默认全关）</div>
+                    <label class="cv-checkrow"><input type="checkbox" id="cv_strip_thinking" ${stripCfg.thinking ? 'checked' : ''}/> <span>&lt;thinking&gt;…&lt;/thinking&gt;</span></label>
+                    <label class="cv-checkrow"><input type="checkbox" id="cv_strip_think" ${stripCfg.think ? 'checked' : ''}/> <span>&lt;think&gt;…&lt;/think&gt;</span></label>
+                    <label class="cv-checkrow"><input type="checkbox" id="cv_strip_html" ${stripCfg.htmlComment ? 'checked' : ''}/> <span>HTML 注释 &lt;!-- … --&gt;</span></label>
+                    <div class="cv-strip-custom-title">自定义标签对（每行一对：前 tag + 后 tag，按字面量匹配）</div>
+                    <div id="cv_strip_custom_list"></div>
+                    <button class="cv-btn cv-strip-add" id="cv_strip_add" type="button">+ 添加一项</button>
+                </div>
+            </div>
+
             <div class="cv-modal-actions">
                 <button class="cv-btn" id="cv_m_cancel">取消</button>
                 <button class="cv-btn cv-btn-primary" id="cv_m_save">保存</button>
@@ -1014,6 +1214,66 @@ function openEditModal(character, fileName) {
     wrap.onclick = closeModal;
     document.getElementById('chatvault_panel').appendChild(wrap);
     setTimeout(() => document.getElementById('cv_m_title').focus(), 0);
+
+    // ---- 剥离设置：渲染自定义标签对列表 + 持久化 ----
+    const renderCustomList = () => {
+        const list = document.getElementById('cv_strip_custom_list');
+        const cur = (loadSettings().strip || DEFAULT_SETTINGS.strip).custom || [];
+        list.innerHTML = cur.map((p, i) => `
+            <div class="cv-strip-pair" data-i="${i}">
+                <input type="text" class="cv-strip-open"  placeholder="前 tag，例：<details>"  value="${escapeHtml(p.open || '')}" />
+                <input type="text" class="cv-strip-close" placeholder="后 tag，例：</details>" value="${escapeHtml(p.close || '')}" />
+                <button class="cv-strip-del" type="button" title="删除">×</button>
+            </div>
+        `).join('') || '<div class="cv-field-hint">（暂无）</div>';
+        list.querySelectorAll('.cv-strip-pair').forEach(row => {
+            const i = Number(row.dataset.i);
+            const sync = () => {
+                const cfg = loadSettings();
+                const arr = cfg.strip?.custom ? [...cfg.strip.custom] : [];
+                arr[i] = {
+                    open: row.querySelector('.cv-strip-open').value,
+                    close: row.querySelector('.cv-strip-close').value,
+                };
+                saveSettings({ ...cfg, strip: { ...DEFAULT_SETTINGS.strip, ...cfg.strip, custom: arr } });
+            };
+            row.querySelector('.cv-strip-open').oninput = sync;
+            row.querySelector('.cv-strip-close').oninput = sync;
+            row.querySelector('.cv-strip-del').onclick = () => {
+                const cfg = loadSettings();
+                const arr = (cfg.strip?.custom || []).filter((_, k) => k !== i);
+                saveSettings({ ...cfg, strip: { ...DEFAULT_SETTINGS.strip, ...cfg.strip, custom: arr } });
+                renderCustomList();
+            };
+        });
+    };
+    renderCustomList();
+    document.getElementById('cv_strip_add').onclick = () => {
+        const cfg = loadSettings();
+        const arr = [...(cfg.strip?.custom || []), { open: '', close: '' }];
+        saveSettings({ ...cfg, strip: { ...DEFAULT_SETTINGS.strip, ...cfg.strip, custom: arr } });
+        renderCustomList();
+    };
+    const saveStripFlags = () => {
+        const cfg = loadSettings();
+        saveSettings({
+            ...cfg,
+            strip: {
+                ...DEFAULT_SETTINGS.strip,
+                ...cfg.strip,
+                thinking: document.getElementById('cv_strip_thinking').checked,
+                think: document.getElementById('cv_strip_think').checked,
+                htmlComment: document.getElementById('cv_strip_html').checked,
+            },
+        });
+    };
+    ['cv_strip_thinking', 'cv_strip_think', 'cv_strip_html'].forEach(id => {
+        document.getElementById(id).onchange = saveStripFlags;
+    });
+
+    // ---- 导出按钮 ----
+    document.getElementById('cv_m_export_jsonl').onclick = () => exportChatJsonl(character, fileName);
+    document.getElementById('cv_m_export_txt').onclick = () => exportChatTxt(character, fileName);
 
     document.getElementById('cv_m_cancel').onclick = closeModal;
     document.getElementById('cv_m_save').onclick = async () => {
