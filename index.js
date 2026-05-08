@@ -450,7 +450,7 @@ async function loadAll() {
         await _headersReady;
         setStatus('正在加载角色列表…');
         charactersCache = await fetchAllCharacters();
-        setStatus(`共 ${charactersCache.length} 个角色，正在加载聊天档案…`);
+        setStatus(`正在加载聊天档案…`);
 
         chatsByAvatar = {};
         errorsByAvatar = {};
@@ -485,7 +485,7 @@ async function loadAll() {
         const totalChats = Object.values(chatsByAvatar).reduce((s, a) => s + a.length, 0);
         const errCount = Object.keys(errorsByAvatar).length;
         const errSuffix = errCount ? `，⚠ ${errCount} 个角色加载失败` : '';
-        setStatus(`✓ 共 ${charactersCache.length} 个角色 · ${totalChats} 条聊天${errSuffix}`);
+        setStatus(`✓ 共 ${totalChats} 条聊天${errSuffix}`);
         render();
     } catch (e) {
         console.error('[ChatVault] 加载失败', e);
