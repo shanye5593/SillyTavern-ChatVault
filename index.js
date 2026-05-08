@@ -482,10 +482,8 @@ async function loadAll() {
         await Promise.all(Array.from({ length: concurrency }, worker));
         if (loadToken !== loadAllToken || !panelEl) return; // 已被新一轮加载或关闭抢占
 
-        const totalChats = Object.values(chatsByAvatar).reduce((s, a) => s + a.length, 0);
         const errCount = Object.keys(errorsByAvatar).length;
-        const errSuffix = errCount ? `，⚠ ${errCount} 个角色加载失败` : '';
-        setStatus(`✓ 共 ${totalChats} 条聊天${errSuffix}`);
+        setStatus(errCount ? `⚠ ${errCount} 个角色加载失败` : '');
         render();
     } catch (e) {
         console.error('[ChatVault] 加载失败', e);
