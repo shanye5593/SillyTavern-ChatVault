@@ -223,15 +223,15 @@ async function jumpToChat(character, fileName) {
 
         const target2 = stripExt(fileName);
         const open = ctx.openCharacterChat || window.openCharacterChat;
+        // 提前关闭面板：手机端等 await 完成才关会出现 openCharacterChat 不 resolve / 软键盘事件吃掉关闭逻辑等问题
+        closePanel();
         if (typeof open === 'function') {
             await open(target2);
         } else if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
             await ctx.executeSlashCommandsWithOptions(`/chat-jump file="${target2}"`);
         } else {
             toastr.warning('已切换角色，但当前 ST 版本无法直接打开指定聊天，请手动选择');
-            return;
         }
-        closePanel();
     } catch (e) {
         console.error('[ChatVault] 跳转失败', e);
         toastr.error(`跳转失败: ${e.message}`);
@@ -388,6 +388,11 @@ function openPanel() {
     });
 
     document.addEventListener('keydown', escHandler);
+
+    // 同步 tab 按钮的高亮状态（activeTab 是模块级变量，跨开关保留）
+    document.querySelectorAll('#cv_tabs .cv-tab').forEach(b => {
+        b.classList.toggle('active', b.dataset.tab === activeTab);
+    });
 
     setupPreviewObserver();
     loadAll();
