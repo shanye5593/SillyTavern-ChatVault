@@ -1,10 +1,10 @@
 /**
  * SillyTavern ChatVault — 全局聊天档案管理器
- * v0.2.2 — 四 tab + 导出 jsonl/txt（可剥离思考标签）+ 当前角色导入
+ * v0.2.3 — 修复手机端编辑弹窗顶起 + 导出折叠 + 滑块开关 + 导入图标改向内
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -421,7 +421,9 @@ const ICONS = {
     chevR: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>`,
     plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
     download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
-    upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+    upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><line x1="4" y1="21" x2="20" y2="21"/></svg>`,
+    close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+    chevDown: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>`,
 };
 
 /* ============================================================
@@ -1169,39 +1171,56 @@ function openEditModal(character, fileName) {
     const wrap = document.createElement('div');
     wrap.className = 'cv-modal-backdrop';
     wrap.id = 'cv_modal';
+    const swRow = (id, checked, label) => `
+        <label class="cv-switch-row">
+            <span class="cv-switch-label">${label}</span>
+            <span class="cv-switch">
+                <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}/>
+                <span class="cv-switch-track"><span class="cv-switch-thumb"></span></span>
+            </span>
+        </label>
+    `;
     wrap.innerHTML = `
         <div class="cv-modal" onclick="event.stopPropagation()">
+            <button class="cv-modal-close" id="cv_m_close" type="button" title="关闭">${ICONS.close}</button>
             <h3>编辑聊天信息</h3>
-            <div class="cv-field">
-                <label>自定义标题</label>
-                <input type="text" id="cv_m_title" value="${escapeHtml(customTitle)}" placeholder="例如：咖啡馆初遇" />
-                <div class="cv-field-hint">仅本机显示，不会修改聊天文件本身</div>
-            </div>
-            <div class="cv-field">
-                <label>标签（用逗号分隔）</label>
-                <input type="text" id="cv_m_tags" value="${escapeHtml(tags.join(', '))}" placeholder="例如：史诗, 现代AU, 重要" />
-            </div>
-            <div class="cv-field">
-                <label>原始文件名</label>
-                <input type="text" id="cv_m_file" value="${escapeHtml(fileName)}" />
-                <div class="cv-field-hint">修改这里会真正在服务器上重命名文件</div>
-            </div>
-
-            <div class="cv-section-divider"></div>
-            <div class="cv-field">
-                <label>导出聊天</label>
-                <div class="cv-export-row">
-                    <button class="cv-btn" id="cv_m_export_jsonl" type="button">${ICONS.download}<span>jsonl（原汁原味）</span></button>
-                    <button class="cv-btn" id="cv_m_export_txt" type="button">${ICONS.download}<span>txt（人类可读）</span></button>
+            <div class="cv-modal-body">
+                <div class="cv-field">
+                    <label>自定义标题</label>
+                    <input type="text" id="cv_m_title" value="${escapeHtml(customTitle)}" placeholder="例如：咖啡馆初遇" />
+                    <div class="cv-field-hint">仅本机显示，不会修改聊天文件本身</div>
                 </div>
-                <div class="cv-strip-box">
-                    <div class="cv-strip-title">导出 txt 时剥离以下标签内的内容（默认全关）</div>
-                    <label class="cv-checkrow"><input type="checkbox" id="cv_strip_thinking" ${stripCfg.thinking ? 'checked' : ''}/> <span>&lt;thinking&gt;…&lt;/thinking&gt;</span></label>
-                    <label class="cv-checkrow"><input type="checkbox" id="cv_strip_think" ${stripCfg.think ? 'checked' : ''}/> <span>&lt;think&gt;…&lt;/think&gt;</span></label>
-                    <label class="cv-checkrow"><input type="checkbox" id="cv_strip_html" ${stripCfg.htmlComment ? 'checked' : ''}/> <span>HTML 注释 &lt;!-- … --&gt;</span></label>
-                    <div class="cv-strip-custom-title">自定义标签对（每行一对：前 tag + 后 tag，按字面量匹配）</div>
-                    <div id="cv_strip_custom_list"></div>
-                    <button class="cv-btn cv-strip-add" id="cv_strip_add" type="button">+ 添加一项</button>
+                <div class="cv-field">
+                    <label>标签（用逗号分隔）</label>
+                    <input type="text" id="cv_m_tags" value="${escapeHtml(tags.join(', '))}" placeholder="例如：史诗, 现代AU, 重要" />
+                </div>
+                <div class="cv-field">
+                    <label>原始文件名</label>
+                    <input type="text" id="cv_m_file" value="${escapeHtml(fileName)}" />
+                    <div class="cv-field-hint">修改这里会真正在服务器上重命名文件</div>
+                </div>
+
+                <div class="cv-section-divider"></div>
+                <div class="cv-collapse" id="cv_export_collapse">
+                    <button class="cv-collapse-head" type="button" id="cv_export_toggle" aria-expanded="false">
+                        <span>导出聊天</span>
+                        <span class="cv-collapse-chev">${ICONS.chevDown}</span>
+                    </button>
+                    <div class="cv-collapse-body">
+                        <div class="cv-export-row">
+                            <button class="cv-btn" id="cv_m_export_jsonl" type="button">${ICONS.download}<span>jsonl（原汁原味）</span></button>
+                            <button class="cv-btn" id="cv_m_export_txt" type="button">${ICONS.download}<span>txt（人类可读）</span></button>
+                        </div>
+                        <div class="cv-strip-box">
+                            <div class="cv-strip-title">导出 txt 时剥离以下标签内的内容（默认全关）</div>
+                            ${swRow('cv_strip_thinking', stripCfg.thinking, '&lt;thinking&gt;…&lt;/thinking&gt;')}
+                            ${swRow('cv_strip_think', stripCfg.think, '&lt;think&gt;…&lt;/think&gt;')}
+                            ${swRow('cv_strip_html', stripCfg.htmlComment, 'HTML 注释 &lt;!-- … --&gt;')}
+                            <div class="cv-strip-custom-title">自定义标签对（每行一对：前 tag + 后 tag，按字面量匹配）</div>
+                            <div id="cv_strip_custom_list"></div>
+                            <button class="cv-btn cv-strip-add" id="cv_strip_add" type="button">+ 添加一项</button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1275,6 +1294,15 @@ function openEditModal(character, fileName) {
     document.getElementById('cv_m_export_jsonl').onclick = () => exportChatJsonl(character, fileName);
     document.getElementById('cv_m_export_txt').onclick = () => exportChatTxt(character, fileName);
 
+    // ---- 折叠：导出区块（默认折叠） ----
+    const collapse = document.getElementById('cv_export_collapse');
+    const toggle = document.getElementById('cv_export_toggle');
+    toggle.onclick = () => {
+        const open = collapse.classList.toggle('is-open');
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+
+    document.getElementById('cv_m_close').onclick = closeModal;
     document.getElementById('cv_m_cancel').onclick = closeModal;
     document.getElementById('cv_m_save').onclick = async () => {
         const newTitle = document.getElementById('cv_m_title').value.trim();
