@@ -989,7 +989,7 @@ function injectButton() {
     btn.id = 'chatvault_open_btn';
     btn.className = 'list-group-item flex-container flexGap5 interactable';
     btn.title = '打开聊天档案';
-    btn.innerHTML = `<div class="fa-solid fa-book"></div><span>聊天档案</span>`;
+    btn.innerHTML = `<i class="fa-solid fa-book extensionsMenuExtensionButton"></i><span>聊天档案</span>`;
     btn.onclick = openPanel;
 
     const extMenu = document.getElementById('extensionsMenu');
