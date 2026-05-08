@@ -402,6 +402,16 @@
     .cv-group-newchat { padding: 6px 8px; }
 }
 
+/* 当前角色 tab 顶部固定信息条 */
+.cv-current-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 4px 12px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--cv-border);
+}
+
 .cv-group-error {
     color: var(--cv-danger);
     font-size: 12px;
