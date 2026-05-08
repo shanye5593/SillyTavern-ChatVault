@@ -228,7 +228,7 @@ function openPanel() {
     panelEl.innerHTML = `
         <div id="chatvault_panel" onclick="event.stopPropagation()">
             <div class="chatvault-header">
-                <h2>📚 聊天记录管理器</h2>
+                <h2>📚 聊天记录管理器 <span style="opacity:0.5;font-size:11px;font-weight:normal">v0.1.5</span></h2>
                 <input type="text" class="chatvault-search" id="cv_search" placeholder="搜索角色名或聊天名…" />
                 <div class="chatvault-toolbar">
                     <button id="cv_only_starred" title="仅看收藏">⭐<span class="cv-btn-label"> 仅看收藏</span></button>
