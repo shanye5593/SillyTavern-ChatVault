@@ -26,8 +26,77 @@
     --cv-radius-card: 8px;
 }
 
+/* ---------- 主题：白底 ---------- */
+.cv-theme-light {
+    --cv-bg-overlay: rgba(0, 0, 0, 0.32);
+    --cv-bg-panel: #ffffff;
+    --cv-bg-card: #fafafa;
+    --cv-bg-card-hover: #f2f2f2;
+    --cv-bg-input: #f5f5f5;
+    --cv-text-primary: #1f2937;
+    --cv-text-secondary: #5f6b7a;
+    --cv-text-tertiary: #9aa3ad;
+    --cv-border: #e5e7eb;
+    --cv-border-soft: rgba(0, 0, 0, 0.04);
+    --cv-accent: #1a3636;
+    --cv-accent-muted: rgba(26, 54, 54, 0.08);
+    --cv-star: #d29c2b;
+    --cv-tag-bg: #eef0f2;
+    --cv-tag-text: #4b5563;
+    --cv-danger: #d9534f;
+    --cv-danger-bg: rgba(217, 83, 79, 0.08);
+    --cv-radius-panel: 12px;
+    --cv-radius-card: 8px;
+}
+
+/* ---------- 主题：咖啡 ---------- */
+.cv-theme-coffee {
+    --cv-bg-overlay: rgba(59, 47, 47, 0.42);
+    --cv-bg-panel: #f8f4ec;
+    --cv-bg-card: #fdfbf7;
+    --cv-bg-card-hover: #f2ebe1;
+    --cv-bg-input: #fdfbf7;
+    --cv-text-primary: #3b2f2f;
+    --cv-text-secondary: #7a6a61;
+    --cv-text-tertiary: #a3968c;
+    --cv-border: #e8e1d5;
+    --cv-border-soft: rgba(59, 47, 47, 0.05);
+    --cv-accent: #c46b4e;
+    --cv-accent-muted: rgba(196, 107, 78, 0.12);
+    --cv-star: #c46b4e;
+    --cv-tag-bg: #f2ebe1;
+    --cv-tag-text: #7a6a61;
+    --cv-danger: #b85c5c;
+    --cv-danger-bg: rgba(184, 92, 92, 0.10);
+    --cv-radius-panel: 12px;
+    --cv-radius-card: 8px;
+}
+
 /* ---------- 入口按钮 ---------- */
 #chatvault_open_btn { cursor: pointer; }
+
+/* ---------- 设置面板（嵌入扩展页） ---------- */
+.cv-settings-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+    flex-wrap: wrap;
+}
+.cv-settings-row label { cursor: pointer; }
+.cv-settings-row select {
+    background: var(--SmartThemeBlurTintColor, #2a2d32);
+    color: var(--SmartThemeBodyColor, #e4e5e7);
+    border: 1px solid var(--SmartThemeBorderColor, #3c4046);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+.cv-settings-hint {
+    font-size: 12px;
+    opacity: 0.6;
+    margin-top: 4px;
+}
 
 /* ---------- 遮罩 ---------- */
 #chatvault_overlay {
