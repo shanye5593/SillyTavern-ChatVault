@@ -1,10 +1,10 @@
 /**
  * SillyTavern ChatVault — 全局聊天档案管理器
- * v0.2.0 — 三 tab + 自定义标题 + 标签 + 最后消息预览
+ * v0.2.1 — 四 tab（新增「当前角色」）+ 自定义标题 + 标签 + 最后消息预览
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -685,19 +685,48 @@ function render() {
     if (currentPage > totalPages) currentPage = totalPages;
     const slice = items.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
+    // 当前角色 tab：顶部固定一个角色信息条 + 新建聊天按钮（即使没聊天也显示）
+    let currentHeader = '';
+    if (activeTab === 'current' && curChar) {
+        const avatarUrl = curChar.avatar
+            ? `/thumbnail?type=avatar&file=${encodeURIComponent(curChar.avatar)}`
+            : '';
+        currentHeader = `
+            <div class="cv-current-header">
+                <img class="cv-group-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
+                <span class="cv-group-name">${escapeHtml(curChar.name || '(无名)')}</span>
+                <span class="cv-group-count">共 ${(chatsByAvatar[curChar.avatar] || []).length} 条聊天</span>
+                <button class="cv-group-newchat" id="cv_current_newchat" title="为该角色新建聊天">
+                    ${ICONS.plus}<span>新建聊天</span>
+                </button>
+            </div>
+        `;
+    }
+
     if (items.length === 0) {
         let empty;
         if (searchQuery) empty = '没有匹配的结果';
         else if (activeTab === 'favorites') empty = '还没有收藏的聊天';
         else if (activeTab === 'current') empty = curChar ? `「${curChar.name || '当前角色'}」还没有聊天记录` : '当前没有选中任何角色，请先在角色列表里选一个';
         else empty = '没有任何聊天记录';
-        body.innerHTML = `<div class="cv-empty">${escapeHtml(empty)}</div>`;
+        body.innerHTML = currentHeader + `<div class="cv-empty">${escapeHtml(empty)}</div>`;
     } else {
         // 当前角色 tab：卡片省略角色名（同一角色重复无意义）
         const hideCharName = activeTab === 'current';
-        body.innerHTML = `<div class="cv-list">${slice.map(({ character, chat }) => renderCard(character, chat, hideCharName)).join('')}</div>`;
+        body.innerHTML = currentHeader + `<div class="cv-list">${slice.map(({ character, chat }) => renderCard(character, chat, hideCharName)).join('')}</div>`;
         bindCardEvents();
         observePreviews();
+    }
+    // 绑定「当前角色」头部的新建聊天按钮
+    if (activeTab === 'current' && curChar) {
+        const newBtn = document.getElementById('cv_current_newchat');
+        if (newBtn) {
+            newBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                if (!confirm(`为「${curChar.name || '角色'}」新建一个聊天？\n\n会切换到该角色并开始全新对话。`)) return;
+                newChatFor(curChar);
+            };
+        }
     }
     renderPagination(items.length, totalPages);
 }
