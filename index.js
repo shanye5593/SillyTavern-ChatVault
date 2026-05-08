@@ -244,6 +244,7 @@ async function jumpToChat(character, fileName) {
 
 let panelEl = null;
 let loadAllToken = 0;            // loadAll 调用计数，用于丢弃过时的回调
+const groupOpen = new Set();     // 「按角色」tab 中已展开的角色 avatar
 let charactersCache = [];        // 角色数组
 let chatsByAvatar = {};          // { avatar: [{file_name, last_mes, mes, file_size, ...}] }
 let errorsByAvatar = {};         // 加载失败信息
@@ -554,6 +555,7 @@ function renderCharactersTab(body) {
         body.innerHTML = `<div class="cv-empty">${searchQuery ? '没有匹配的结果' : '没有任何聊天记录'}</div>`;
         return;
     }
+    // 搜索时默认全部展开，便于看到匹配结果；否则按用户记忆的状态（默认折叠）
     body.innerHTML = groups.map(({ character: c, chats }) => {
         const avatarUrl = c.avatar
             ? `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`
@@ -562,19 +564,35 @@ function renderCharactersTab(body) {
         const right = errMsg
             ? `<span class="cv-group-error" title="${escapeHtml(errMsg)}">⚠ 加载失败</span>`
             : `<span class="cv-group-count">共 ${chats.length} 条聊天</span>`;
+        const expanded = !!searchQuery || groupOpen.has(c.avatar);
         return `
-            <div class="cv-group">
+            <div class="cv-group ${expanded ? 'is-open' : ''}" data-avatar="${escapeHtml(c.avatar)}">
                 <div class="cv-group-header">
+                    <span class="cv-group-toggle">${ICONS.chevR}</span>
                     <img class="cv-group-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
                     <span class="cv-group-name">${highlight(c.name || '(无名)', searchQuery)}</span>
                     ${right}
                 </div>
-                <div class="cv-list">
+                <div class="cv-list cv-group-list">
                     ${chats.map(ch => renderCard(c, ch, /*hideCharName*/ true)).join('')}
                 </div>
             </div>
         `;
     }).join('');
+    // 绑定折叠
+    body.querySelectorAll('.cv-group').forEach(g => {
+        const header = g.querySelector('.cv-group-header');
+        if (!header) return;
+        header.onclick = () => {
+            const avatar = g.dataset.avatar;
+            const nowOpen = !g.classList.contains('is-open');
+            g.classList.toggle('is-open', nowOpen);
+            if (nowOpen) groupOpen.add(avatar);
+            else groupOpen.delete(avatar);
+            // 展开后才让预览开始懒加载
+            if (nowOpen) observePreviews();
+        };
+    });
     bindCardEvents();
     observePreviews();
 }
