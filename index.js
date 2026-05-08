@@ -319,7 +319,7 @@ const groupOpen = new Set();     // 「按角色」tab 中已展开的角色 ava
 let charactersCache = [];        // 角色数组
 let chatsByAvatar = {};          // { avatar: [{file_name, last_mes, mes, file_size, ...}] }
 let errorsByAvatar = {};         // 加载失败信息
-let activeTab = 'recent';        // 'recent' | 'characters' | 'favorites'
+let activeTab = 'recent';        // 'recent' | 'characters' | 'favorites' | 'current'
 let currentPage = 1;             // 当前 tab 内的分页
 let searchQuery = '';
 let previewObserver = null;
@@ -435,6 +435,7 @@ function openPanel() {
                     <button class="cv-tab active" data-tab="recent">最近<span class="cv-tab-count" id="cv_count_recent"></span></button>
                     <button class="cv-tab" data-tab="characters">按角色<span class="cv-tab-count" id="cv_count_characters"></span></button>
                     <button class="cv-tab" data-tab="favorites">收藏<span class="cv-tab-count" id="cv_count_favorites"></span></button>
+                    <button class="cv-tab" data-tab="current">当前角色<span class="cv-tab-count" id="cv_count_current"></span></button>
                 </div>
                 <div class="cv-pagination" id="cv_pagination"></div>
             </div>
@@ -591,6 +592,30 @@ function viewFavorites() {
         .sort((a, b) => timestampOf(b.chat) - timestampOf(a.chat));
 }
 
+function getCurrentCharacter() {
+    try {
+        const ctx = SillyTavern.getContext();
+        const idx = Number(ctx.characterId);
+        if (!Number.isFinite(idx) || idx < 0) return null;
+        const c = ctx.characters?.[idx];
+        if (!c || !c.avatar) return null;
+        // 用 charactersCache 里的同 avatar 实例（保证后续操作引用一致）
+        return charactersCache.find(x => x.avatar === c.avatar) || c;
+    } catch {
+        return null;
+    }
+}
+
+function viewCurrentCharacter() {
+    const c = getCurrentCharacter();
+    if (!c) return { character: null, items: [] };
+    const list = (chatsByAvatar[c.avatar] || [])
+        .filter(ch => matchesSearch(c, ch))
+        .sort((a, b) => timestampOf(b) - timestampOf(a))
+        .map(chat => ({ character: c, chat }));
+    return { character: c, items: list };
+}
+
 function viewByCharacter() {
     // 按角色分组：[{character, chats: [...]}]，每组按时间倒序，组按"该组最新一条"倒序
     const groups = [];
@@ -620,10 +645,13 @@ function updateTabCounts() {
     const totalFav = flatAllChats().filter(({ character, chat }) =>
         getMetaFor(character.avatar, chat.file_name).starred).length;
     const totalChars = viewByCharacter().length;
+    const cur = getCurrentCharacter();
+    const totalCur = cur ? (chatsByAvatar[cur.avatar] || []).length : 0;
     const set = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
     set('cv_count_recent', totalAll);
     set('cv_count_characters', totalChars);
     set('cv_count_favorites', totalFav);
+    set('cv_count_current', totalCur);
 }
 
 function render() {
@@ -638,19 +666,33 @@ function render() {
         return;
     }
 
-    const items = activeTab === 'favorites' ? viewFavorites() : viewRecent();
+    let items;
+    let curChar = null;
+    if (activeTab === 'favorites') {
+        items = viewFavorites();
+    } else if (activeTab === 'current') {
+        const v = viewCurrentCharacter();
+        items = v.items;
+        curChar = v.character;
+    } else {
+        items = viewRecent();
+    }
+
     const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     if (currentPage > totalPages) currentPage = totalPages;
     const slice = items.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
     if (items.length === 0) {
-        body.innerHTML = `<div class="cv-empty">${
-            searchQuery ? '没有匹配的结果'
-            : activeTab === 'favorites' ? '还没有收藏的聊天'
-            : '没有任何聊天记录'
-        }</div>`;
+        let empty;
+        if (searchQuery) empty = '没有匹配的结果';
+        else if (activeTab === 'favorites') empty = '还没有收藏的聊天';
+        else if (activeTab === 'current') empty = curChar ? `「${curChar.name || '当前角色'}」还没有聊天记录` : '当前没有选中任何角色，请先在角色列表里选一个';
+        else empty = '没有任何聊天记录';
+        body.innerHTML = `<div class="cv-empty">${escapeHtml(empty)}</div>`;
     } else {
-        body.innerHTML = `<div class="cv-list">${slice.map(({ character, chat }) => renderCard(character, chat)).join('')}</div>`;
+        // 当前角色 tab：卡片省略角色名（同一角色重复无意义）
+        const hideCharName = activeTab === 'current';
+        body.innerHTML = `<div class="cv-list">${slice.map(({ character, chat }) => renderCard(character, chat, hideCharName)).join('')}</div>`;
         bindCardEvents();
         observePreviews();
     }
