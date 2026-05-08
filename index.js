@@ -62,28 +62,34 @@ async function fetchAllCharacters() {
 }
 
 async function fetchChatsFor(avatar) {
-    let lastErr = null;
-    // 新版 API
+    // 完全模仿酒馆官方 getPastCharacterChats() 的实现（script.js:8446）
+    let res;
     try {
-        const res = await fetch('/api/characters/chats', {
-            method: 'POST',
-            headers: headers(),
-            body: JSON.stringify({ avatar_url: avatar, simple: true }),
-        });
-        if (res.ok) return await res.json();
-        lastErr = new Error(`HTTP ${res.status}`);
-    } catch (e) { lastErr = e; }
-    // 兼容旧版 API
-    try {
-        const res = await fetch('/api/chats/getall', {
+        res = await fetch('/api/characters/chats', {
             method: 'POST',
             headers: headers(),
             body: JSON.stringify({ avatar_url: avatar }),
         });
-        if (res.ok) return await res.json();
-        lastErr = new Error(`HTTP ${res.status}`);
-    } catch (e) { lastErr = e; }
-    throw lastErr || new Error('未知错误');
+    } catch (e) {
+        throw new Error(`网络错误: ${e.message}`);
+    }
+    if (!res.ok) {
+        let body = '';
+        try { body = (await res.text()).slice(0, 200); } catch {}
+        throw new Error(`HTTP ${res.status}${body ? ' - ' + body : ''}`);
+    }
+    let data;
+    try {
+        data = await res.json();
+    } catch (e) {
+        throw new Error(`响应解析失败: ${e.message}`);
+    }
+    // {error: true} 表示该角色还没有聊天目录 → 视为空，不是错误
+    if (data && typeof data === 'object' && data.error === true) {
+        return [];
+    }
+    // 响应可能是数组也可能是对象，用 Object.values 统一处理
+    return Array.isArray(data) ? data : Object.values(data || {});
 }
 
 // 规范化：file_name 在不同 ST 版本里可能带或不带 .jsonl
