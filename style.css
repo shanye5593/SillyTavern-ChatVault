@@ -1,0 +1,271 @@
+/* ========== ChatVault 样式 ========== */
+
+/* 顶部入口按钮 */
+#chatvault_open_btn {
+    cursor: pointer;
+}
+
+/* 弹层遮罩 */
+#chatvault_overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* 主面板 */
+#chatvault_panel {
+    width: min(1100px, 95vw);
+    height: min(800px, 90vh);
+    background: var(--SmartThemeBlurTintColor, #1f1f1f);
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 10px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* 头部 */
+.chatvault-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+    background: var(--SmartThemeBlurTintColor, #2a2a2a);
+}
+
+.chatvault-header h2 {
+    margin: 0;
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+.chatvault-search {
+    flex: 1;
+    padding: 6px 10px;
+    background: var(--black50a, rgba(0, 0, 0, 0.3));
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+.chatvault-search:focus {
+    outline: 1px solid var(--SmartThemeQuoteColor, #5a9);
+}
+
+.chatvault-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.chatvault-toolbar button,
+.chatvault-toolbar label {
+    cursor: pointer;
+    background: transparent;
+    color: inherit;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.chatvault-toolbar button:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.chatvault-toolbar button.active {
+    background: var(--SmartThemeQuoteColor, #5a9);
+    color: #000;
+}
+
+#chatvault_close {
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 8px;
+}
+
+/* 状态条 */
+.chatvault-status {
+    padding: 6px 16px;
+    font-size: 12px;
+    color: var(--SmartThemeFadedColor, #888);
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #333);
+}
+
+/* 列表区 */
+.chatvault-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+}
+
+/* 角色块 */
+.cv-char {
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #2c2c2c);
+}
+
+.cv-char-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.cv-char-header:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.cv-char-toggle {
+    width: 14px;
+    text-align: center;
+    color: var(--SmartThemeFadedColor, #888);
+    transition: transform 0.15s;
+}
+
+.cv-char.expanded .cv-char-toggle {
+    transform: rotate(90deg);
+}
+
+.cv-char-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: #333;
+}
+
+.cv-char-name {
+    flex: 1;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cv-char-count {
+    color: var(--SmartThemeFadedColor, #888);
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+/* 聊天列表 */
+.cv-chats {
+    display: none;
+    padding: 4px 16px 8px 48px;
+}
+
+.cv-char.expanded .cv-chats {
+    display: block;
+}
+
+.cv-chat {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.cv-chat:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.cv-chat-star {
+    cursor: pointer;
+    color: var(--SmartThemeFadedColor, #555);
+    flex-shrink: 0;
+}
+
+.cv-chat-star.starred {
+    color: #f7c948;
+}
+
+.cv-chat-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cv-chat-name input {
+    width: 100%;
+    background: var(--black50a, rgba(0, 0, 0, 0.4));
+    color: inherit;
+    border: 1px solid var(--SmartThemeQuoteColor, #5a9);
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-size: 13px;
+}
+
+.cv-chat-meta {
+    color: var(--SmartThemeFadedColor, #888);
+    font-size: 11px;
+    flex-shrink: 0;
+    min-width: 80px;
+    text-align: right;
+}
+
+.cv-chat-actions {
+    display: none;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.cv-chat:hover .cv-chat-actions {
+    display: flex;
+}
+
+.cv-chat-actions button {
+    background: transparent;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    color: inherit;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.cv-chat-actions button:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.cv-chat-actions button.danger:hover {
+    background: #c33;
+    border-color: #c33;
+}
+
+/* 高亮 */
+.cv-highlight {
+    background: var(--SmartThemeQuoteColor, #5a9);
+    color: #000;
+    border-radius: 2px;
+    padding: 0 2px;
+}
+
+/* 空状态 */
+.cv-empty {
+    text-align: center;
+    color: var(--SmartThemeFadedColor, #888);
+    padding: 40px 16px;
+    font-size: 14px;
+}
+
+/* 加载中 */
+.cv-loading {
+    text-align: center;
+    padding: 40px 16px;
+    color: var(--SmartThemeFadedColor, #888);
+}
