@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "shanye5593",
-    "version": "0.2.3",
+    "version": "0.2.4",
     "homePage": "https://github.com/shanye5593/SillyTavern-ChatVault",
     "auto_update": true,
     "minimum_client_version": "1.12.0"
