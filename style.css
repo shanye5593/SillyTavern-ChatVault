@@ -20,6 +20,8 @@
 #chatvault_panel {
     width: min(1100px, 95vw);
     height: min(800px, 90vh);
+    max-width: 100vw;
+    max-height: 100vh;
     background: var(--SmartThemeBlurTintColor, #1f1f1f);
     color: var(--SmartThemeBodyColor, #e0e0e0);
     border: 1px solid var(--SmartThemeBorderColor, #444);
@@ -30,30 +32,37 @@
     overflow: hidden;
 }
 
-/* 头部 */
+/* 头部 - 用 grid 布局，避免被挤压 */
 .chatvault-header {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: "title search toolbar";
     align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
+    gap: 8px 12px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
     background: var(--SmartThemeBlurTintColor, #2a2a2a);
-}
-
-.chatvault-header h2 {
-    margin: 0;
-    font-size: 16px;
     flex-shrink: 0;
 }
 
+.chatvault-header h2 {
+    grid-area: title;
+    margin: 0;
+    font-size: 15px;
+    white-space: nowrap;
+}
+
 .chatvault-search {
-    flex: 1;
+    grid-area: search;
+    width: 100%;
+    min-width: 0;
     padding: 6px 10px;
     background: var(--black50a, rgba(0, 0, 0, 0.3));
     color: var(--SmartThemeBodyColor, #e0e0e0);
     border: 1px solid var(--SmartThemeBorderColor, #444);
     border-radius: 6px;
     font-size: 14px;
+    box-sizing: border-box;
 }
 
 .chatvault-search:focus {
@@ -61,9 +70,12 @@
 }
 
 .chatvault-toolbar {
+    grid-area: toolbar;
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 .chatvault-toolbar button,
@@ -75,6 +87,7 @@
     border-radius: 4px;
     padding: 4px 8px;
     font-size: 12px;
+    white-space: nowrap;
 }
 
 .chatvault-toolbar button:hover {
@@ -90,6 +103,59 @@
     font-size: 18px;
     line-height: 1;
     padding: 2px 8px;
+}
+
+/* 按钮上的文字标签（窄屏时隐藏，只剩 emoji） */
+.cv-btn-label {
+    display: inline;
+}
+
+/* ===== 中等屏幕（平板）：标题缩短，搜索框换行 ===== */
+@media (max-width: 900px) {
+    .chatvault-header {
+        grid-template-columns: 1fr auto;
+        grid-template-areas:
+            "title toolbar"
+            "search search";
+    }
+    .chatvault-search {
+        grid-column: 1 / -1;
+    }
+}
+
+/* ===== 手机屏幕：全屏 + 紧凑布局 ===== */
+@media (max-width: 600px) {
+    #chatvault_overlay {
+        padding: 0;
+    }
+    #chatvault_panel {
+        width: 100vw;
+        height: 100vh;
+        max-width: 100vw;
+        max-height: 100vh;
+        border-radius: 0;
+        border: none;
+    }
+    .chatvault-header {
+        padding: 8px 10px;
+    }
+    .chatvault-header h2 {
+        font-size: 14px;
+    }
+    /* 隐藏按钮文字，只保留 emoji */
+    .cv-btn-label {
+        display: none;
+    }
+    .chatvault-toolbar button {
+        padding: 6px 8px;
+        font-size: 14px;
+    }
+    .cv-chats {
+        padding-left: 24px;
+    }
+    .cv-chat-meta {
+        display: none;
+    }
 }
 
 /* 状态条 */
