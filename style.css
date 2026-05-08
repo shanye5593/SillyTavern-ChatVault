@@ -272,13 +272,15 @@
     transform: rotate(90deg);
 }
 
-.cv-group-list {
+.cv-group .cv-group-list {
     display: none;
     padding: 4px 0 14px;
 }
 
 .cv-group.is-open .cv-group-list {
     display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
 .cv-group-avatar {
