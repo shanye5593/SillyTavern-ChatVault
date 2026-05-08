@@ -82,17 +82,28 @@ function headers() {
 }
 
 async function fetchAllCharacters() {
+    let raw = null;
     try {
         const ctx = SillyTavern.getContext();
-        if (ctx?.characters?.length) return ctx.characters;
+        if (ctx?.characters?.length) raw = ctx.characters;
     } catch {}
-    const res = await fetch('/api/characters/all', {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({}),
+    if (!raw) {
+        const res = await fetch('/api/characters/all', {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({}),
+        });
+        if (!res.ok) throw new Error(`角色列表请求失败: ${res.status}`);
+        raw = await res.json();
+    }
+    // 去重：ctx.characters 在某些 ST 版本里会因 shallow/full 双加载或世界书引用出现重复
+    const seen = new Set();
+    return (Array.isArray(raw) ? raw : []).filter(c => {
+        if (!c || !c.avatar) return false;
+        if (seen.has(c.avatar)) return false;
+        seen.add(c.avatar);
+        return true;
     });
-    if (!res.ok) throw new Error(`角色列表请求失败: ${res.status}`);
-    return await res.json();
 }
 
 async function fetchChatsFor(avatar) {
