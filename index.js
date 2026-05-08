@@ -40,9 +40,40 @@ function toggleStar(avatar, fileName) {
 
 // ---------- 酒馆 API 调用 ----------
 
+// 新版酒馆把 getRequestHeaders 改成了 ESM 导出，全局不再可用
+// 用动态 import 拿到它；如果失败，用 cookie 自己构造 CSRF 头
+let _getReqHeaders = null;
+const _headersReady = (async () => {
+    try {
+        const mod = await import('../../../../script.js');
+        if (typeof mod.getRequestHeaders === 'function') {
+            _getReqHeaders = mod.getRequestHeaders;
+            console.log('[ChatVault] getRequestHeaders 已通过 ESM import 加载');
+        }
+    } catch (e) {
+        console.warn('[ChatVault] 动态 import script.js 失败，将使用 cookie fallback:', e.message);
+    }
+})();
+
+function getCsrfTokenFromCookie() {
+    const m = document.cookie.split(';')
+        .map(c => c.trim())
+        .find(c => c.startsWith('csrf-token=') || c.startsWith('X-CSRF-Token='));
+    if (!m) return null;
+    return decodeURIComponent(m.split('=').slice(1).join('='));
+}
+
 function headers() {
-    // SillyTavern 全局函数，自动处理 CSRF
-    return getRequestHeaders();
+    // 1. 优先用 ESM 导出的官方函数
+    if (typeof _getReqHeaders === 'function') return _getReqHeaders();
+    // 2. 老版本酒馆的全局函数
+    if (typeof globalThis.getRequestHeaders === 'function') return globalThis.getRequestHeaders();
+    // 3. 自己构造（从 cookie 读 CSRF）
+    const token = getCsrfTokenFromCookie();
+    return {
+        'Content-Type': 'application/json',
+        ...(token ? { 'X-CSRF-Token': token } : {}),
+    };
 }
 
 async function fetchAllCharacters() {
@@ -253,9 +284,12 @@ function setStatus(text) {
 }
 
 async function loadAll() {
-    setStatus('正在加载角色列表…');
+    setStatus('正在初始化…');
     document.getElementById('cv_body').innerHTML = '<div class="cv-loading">正在加载…</div>';
     try {
+        // 等待 getRequestHeaders 动态加载完成（避免竞态）
+        await _headersReady;
+        setStatus('正在加载角色列表…');
         charactersCache = await fetchAllCharacters();
         setStatus(`共 ${charactersCache.length} 个角色，正在加载聊天档案…`);
 
