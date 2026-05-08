@@ -35,6 +35,7 @@
     inset: 0 !important;
     width: 100vw !important;
     height: 100vh !important;
+    height: 100dvh !important; /* 手机浏览器：扣掉地址栏 */
     background: var(--cv-bg-overlay);
     z-index: 99999 !important;
     display: flex !important;
@@ -51,6 +52,7 @@
 #chatvault_panel {
     width: min(1100px, 95vw) !important;
     height: min(800px, 92vh) !important;
+    height: min(800px, 92dvh) !important;
     background: var(--cv-bg-panel);
     color: var(--cv-text-primary);
     border: 1px solid var(--cv-border);
@@ -640,15 +642,18 @@
     #chatvault_panel {
         width: 100vw !important;
         height: 100vh !important;
+        height: 100dvh !important;       /* 手机浏览器：动态视口高度 */
+        max-height: 100dvh !important;
         border-radius: 0;
         border: none;
     }
-    .cv-header { padding: 14px 16px; gap: 8px; }
+    .cv-header { padding: 14px 16px; gap: 8px; padding-top: max(14px, env(safe-area-inset-top)); }
     .cv-header h1 { font-size: 16px; }
     .cv-search-wrap { max-width: none; }
     .cv-tabbar { padding: 12px 16px 8px; flex-wrap: wrap; }
     .cv-status { padding: 2px 16px 6px; }
-    .cv-body { padding: 0 14px 20px; }
+    /* 列表底部加 safe-area，避开手势条/底部地址栏 */
+    .cv-body { padding: 0 14px max(20px, env(safe-area-inset-bottom)); }
     .cv-card { padding: 12px; gap: 12px; }
     .cv-card-avatar { width: 36px; height: 36px; }
     .cv-title { font-size: 15px; }
