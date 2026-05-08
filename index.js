@@ -277,20 +277,51 @@ function fmtSize(bytes) {
 }
 function fmtRelTime(dateStr) {
     if (!dateStr) return '';
-    const d = new Date(dateStr);
-    if (isNaN(d)) return String(dateStr);
-    const diff = Date.now() - d.getTime();
+    const t = parseSTDate(dateStr);
+    if (!t) return '';
+    const diff = Date.now() - t;
     const min = 60_000, hour = 60 * min, day = 24 * hour;
-    if (diff < hour) return `${Math.max(1, Math.floor(diff / min))} 分钟前`;
+    if (diff < min) return '刚刚';
+    if (diff < hour) return `${Math.floor(diff / min)} 分钟前`;
     if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
     if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
     if (diff < 30 * day) return `${Math.floor(diff / (7 * day))} 周前`;
     if (diff < 365 * day) return `${Math.floor(diff / (30 * day))} 个月前`;
-    return d.toLocaleDateString();
+    return new Date(t).toLocaleDateString();
 }
+// 兼容 ST 的多种时间字符串：humanizedDateTime("2026-5-8 @14h 32m 15s 123ms")、ISO、locale string、以及从文件名推断
+function parseSTDate(s) {
+    if (s == null) return 0;
+    if (typeof s === 'number') return s;
+    const str = String(s).trim();
+    if (!str) return 0;
+    // ST humanizedDateTime: "YYYY-M-D @Hh Mm Ss MSms"（@ 与各 unit 之间空格可有可无）
+    let m = str.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s*@?\s*(\d{1,2})\s*h\s*(\d{1,2})\s*m(?:\s*(\d{1,2})\s*s)?(?:\s*(\d{1,3})\s*ms)?/i);
+    if (m) {
+        const [, y, mo, d, h, mi, se = '0', ms = '0'] = m;
+        const t = new Date(+y, +mo - 1, +d, +h, +mi, +se, +ms).getTime();
+        if (!isNaN(t)) return t;
+    }
+    // 紧凑变体："YYYY-MM-DD @HHhMMm" / "YYYY-MM-DDTHH:MM:SS"
+    m = str.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T@]+(\d{1,2})[h:](\d{1,2})/i);
+    if (m) {
+        const [, y, mo, d, h, mi] = m;
+        const t = new Date(+y, +mo - 1, +d, +h, +mi).getTime();
+        if (!isNaN(t)) return t;
+    }
+    // 兜底：让浏览器原生解析
+    const direct = Date.parse(str);
+    if (!isNaN(direct)) return direct;
+    return 0;
+}
+
 function timestampOf(chat) {
-    const d = chat?.last_mes ? new Date(chat.last_mes) : null;
-    return d && !isNaN(d) ? d.getTime() : 0;
+    if (!chat) return 0;
+    // 优先用 last_mes，再退到 create_date / mes_last_date / 文件名
+    return parseSTDate(chat.last_mes)
+        || parseSTDate(chat.create_date)
+        || parseSTDate(chat.mes_last_date)
+        || parseSTDate(chat.file_name);
 }
 
 /* ============================================================
