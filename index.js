@@ -6,7 +6,29 @@
 
 const VERSION = '0.2.0';
 const STORAGE_KEY = 'st-chatvault-meta';
+const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
+const THEMES = [
+    { id: 'dark',   name: '夜间 Dark' },
+    { id: 'light',  name: '白底 Light' },
+    { id: 'coffee', name: '咖啡 Coffee' },
+];
+const DEFAULT_SETTINGS = { enabled: true, theme: 'dark' };
+
+function loadSettings() {
+    try {
+        return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') };
+    } catch {
+        return { ...DEFAULT_SETTINGS };
+    }
+}
+function saveSettings(s) {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+}
+function currentThemeClass() {
+    const id = loadSettings().theme;
+    return THEMES.some(t => t.id === id) ? `cv-theme-${id}` : 'cv-theme-dark';
+}
 
 /* ============================================================
  *  本地元数据：收藏 / 自定义标题 / 标签
@@ -359,7 +381,7 @@ function openPanel() {
     if (panelEl) return;
     panelEl = document.createElement('div');
     panelEl.id = 'chatvault_overlay';
-    panelEl.className = 'cv-theme-dark';
+    panelEl.className = currentThemeClass();
     panelEl.innerHTML = `
         <div id="chatvault_panel" onclick="event.stopPropagation()">
             <div class="cv-header">
@@ -977,10 +999,81 @@ function injectButton() {
     document.body.appendChild(btn);
 }
 
+function removeButton() {
+    document.getElementById('chatvault_open_btn')?.remove();
+}
+
+function applyEnabledState() {
+    const s = loadSettings();
+    if (s.enabled) injectButton();
+    else {
+        removeButton();
+        if (panelEl) closePanel();
+    }
+}
+
+/* ============================================================
+ *  扩展设置面板（嵌入 ST「扩展」页）
+ * ============================================================ */
+
+function injectSettings() {
+    const host = document.getElementById('extensions_settings2')
+              || document.getElementById('extensions_settings');
+    if (!host || document.getElementById('chatvault_settings')) return;
+
+    const s = loadSettings();
+    const wrap = document.createElement('div');
+    wrap.id = 'chatvault_settings';
+    wrap.className = 'extension_container interactable';
+    wrap.innerHTML = `
+      <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+          <b>聊天档案 (ChatVault)</b>
+          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+          <div class="cv-settings-row">
+            <label class="checkbox_label" for="cv_set_enabled">
+              <input type="checkbox" id="cv_set_enabled" ${s.enabled ? 'checked' : ''}>
+              <span>启用入口按钮（在扩展菜单里显示「聊天档案」）</span>
+            </label>
+          </div>
+          <div class="cv-settings-row">
+            <label for="cv_set_theme">配色方案：</label>
+            <select id="cv_set_theme">
+              ${THEMES.map(t => `<option value="${t.id}" ${s.theme === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
+            </select>
+          </div>
+          <div class="cv-settings-hint">
+            v${VERSION} · 设置实时生效，主题切换会立即应用到已打开的面板。
+          </div>
+        </div>
+      </div>
+    `;
+    host.appendChild(wrap);
+
+    wrap.querySelector('#cv_set_enabled').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, enabled: !!e.target.checked });
+        applyEnabledState();
+    });
+    wrap.querySelector('#cv_set_theme').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, theme: e.target.value });
+        if (panelEl) panelEl.className = currentThemeClass();
+    });
+}
+
 jQuery(async () => {
     const tryInject = () => {
-        if (document.getElementById('extensionsMenu')) injectButton();
-        else setTimeout(tryInject, 500);
+        if (document.getElementById('extensionsMenu')) applyEnabledState();
+        if (document.getElementById('extensions_settings2')
+         || document.getElementById('extensions_settings')) injectSettings();
+
+        if (!document.getElementById('chatvault_open_btn') && loadSettings().enabled
+         || !document.getElementById('chatvault_settings')) {
+            setTimeout(tryInject, 500);
+        }
     };
     tryInject();
     console.log(`[ChatVault] v${VERSION} 已加载`);
