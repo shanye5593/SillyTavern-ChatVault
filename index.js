@@ -153,10 +153,11 @@ async function fetchLastMessageText(character, fileName) {
     const key = metaKey(character.avatar, fileName);
     if (previewCache.has(key)) return previewCache.get(key);
 
-    // 尝试多种 body 形态以兼容不同 ST 版本
+    // 尝试多种 body 形态以兼容不同 ST 版本（带 force:true 跳过缓存）
     const bodies = [
+        { ch_name: character.name, file_name: stripExt(fileName), avatar_url: character.avatar, force: true },
+        { avatar_url: character.avatar, file_name: withExt(fileName), force: true },
         { ch_name: character.name, file_name: stripExt(fileName), avatar_url: character.avatar },
-        { avatar_url: character.avatar, file_name: withExt(fileName) },
     ];
     for (const body of bodies) {
         try {
@@ -242,6 +243,7 @@ async function jumpToChat(character, fileName) {
  * ============================================================ */
 
 let panelEl = null;
+let loadAllToken = 0;            // loadAll 调用计数，用于丢弃过时的回调
 let charactersCache = [];        // 角色数组
 let chatsByAvatar = {};          // { avatar: [{file_name, last_mes, mes, file_size, ...}] }
 let errorsByAvatar = {};         // 加载失败信息
@@ -393,6 +395,7 @@ function setStatus(text) {
  * ============================================================ */
 
 async function loadAll() {
+    const loadToken = ++loadAllToken; // 防止重复打开造成的并发污染
     setStatus('正在初始化…');
     document.getElementById('cv_body').innerHTML = '<div class="cv-loading">正在加载…</div>';
     try {
@@ -429,6 +432,7 @@ async function loadAll() {
         }
 
         await Promise.all(Array.from({ length: concurrency }, worker));
+        if (loadToken !== loadAllToken || !panelEl) return; // 已被新一轮加载或关闭抢占
 
         const totalChats = Object.values(chatsByAvatar).reduce((s, a) => s + a.length, 0);
         const errCount = Object.keys(errorsByAvatar).length;
@@ -514,6 +518,7 @@ function updateTabCounts() {
 }
 
 function render() {
+    if (!panelEl) return; // 面板已被关闭，忽略残留的异步回调
     const body = document.getElementById('cv_body');
     if (!body) return;
     updateTabCounts();
@@ -683,9 +688,9 @@ function bindCardEvents() {
             };
         });
 
-        // 双击卡片打开
+        // 双击卡片打开（避开操作按钮区与编辑/删除 modal 触发）
         card.ondblclick = (e) => {
-            if (e.target.closest('.cv-act')) return;
+            if (e.target.closest('.cv-actions')) return;
             jumpToChat(character, fileName);
         };
     });
