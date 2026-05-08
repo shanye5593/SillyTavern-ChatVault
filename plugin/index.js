@@ -1,10 +1,10 @@
 /**
  * SillyTavern ChatVault — 全局聊天档案管理器
- * v0.2.0 — 三 tab + 自定义标题 + 标签 + 最后消息预览
+ * v0.2.1 — 四 tab（新增「当前角色」）+ 自定义标题 + 标签 + 最后消息预览
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
