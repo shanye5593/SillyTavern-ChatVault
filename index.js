@@ -234,6 +234,44 @@ function waitFor(predicate, timeout = 3000, interval = 50) {
     });
 }
 
+async function newChatFor(character) {
+    try {
+        const ctx = SillyTavern.getContext();
+        const candidates = ctx.characters
+            .map((c, idx) => ({ c, idx }))
+            .filter(({ c }) => c.avatar === character.avatar);
+        const target = candidates.find(({ c }) => c.name === character.name) || candidates[0];
+        if (!target) throw new Error('找不到角色（可能已被删除）');
+        const chid = target.idx;
+
+        const select = ctx.selectCharacterById || window.selectCharacterById;
+        if (typeof select !== 'function') throw new Error('当前 ST 版本不支持自动切换角色');
+        await select(chid);
+
+        const ok = await waitFor(() => {
+            const c = SillyTavern.getContext();
+            return Number(c.characterId) === chid;
+        }, 3000);
+        if (!ok) throw new Error('角色切换超时');
+
+        // 提前关闭面板（手机端同样的考量）
+        closePanel();
+
+        if (typeof ctx.newChat === 'function') {
+            await ctx.newChat();
+        } else if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
+            await ctx.executeSlashCommandsWithOptions('/newchat');
+        } else {
+            toastr.warning('已切换角色，但当前 ST 版本无法自动新建聊天，请手动新建');
+            return;
+        }
+        toastr.success(`已为「${character.name || '角色'}」新建聊天`);
+    } catch (e) {
+        console.error('[ChatVault] 新建聊天失败', e);
+        toastr.error(`新建聊天失败: ${e.message}`);
+    }
+}
+
 async function jumpToChat(character, fileName) {
     try {
         const ctx = SillyTavern.getContext();
@@ -371,6 +409,7 @@ const ICONS = {
     clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
     chevL: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>`,
     chevR: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>`,
+    plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
 };
 
 /* ============================================================
@@ -641,6 +680,9 @@ function renderCharactersTab(body) {
                     <img class="cv-group-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
                     <span class="cv-group-name">${highlight(c.name || '(无名)', searchQuery)}</span>
                     ${right}
+                    <button class="cv-group-newchat" title="为该角色新建聊天">
+                        ${ICONS.plus}<span>新建聊天</span>
+                    </button>
                 </div>
                 <div class="cv-list cv-group-list">
                     ${chats.map(ch => renderCard(c, ch, /*hideCharName*/ true)).join('')}
@@ -652,13 +694,23 @@ function renderCharactersTab(body) {
     body.querySelectorAll('.cv-group').forEach(g => {
         const header = g.querySelector('.cv-group-header');
         if (!header) return;
+        const avatar = g.dataset.avatar;
+        // 新建聊天按钮：阻断折叠、确认后新建
+        const newBtn = header.querySelector('.cv-group-newchat');
+        if (newBtn) {
+            newBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                const character = (charactersCache || []).find(c => c.avatar === avatar);
+                if (!character) return;
+                if (!confirm(`为「${character.name || '角色'}」新建一个聊天？\n\n会切换到该角色并开始全新对话。`)) return;
+                newChatFor(character);
+            };
+        }
         header.onclick = () => {
-            const avatar = g.dataset.avatar;
             const nowOpen = !g.classList.contains('is-open');
             g.classList.toggle('is-open', nowOpen);
             if (nowOpen) groupOpen.add(avatar);
             else groupOpen.delete(avatar);
-            // 展开后才让预览开始懒加载
             if (nowOpen) observePreviews();
         };
     });
