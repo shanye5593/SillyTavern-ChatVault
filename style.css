@@ -241,7 +241,8 @@
 
 /* ---------- 角色分组（按角色 tab） ---------- */
 .cv-group {
-    margin-top: 16px;
+    margin-top: 12px;
+    border-bottom: 1px solid var(--cv-border);
 }
 
 .cv-group-header {
@@ -249,8 +250,35 @@
     align-items: center;
     gap: 12px;
     padding: 10px 4px 12px;
-    border-bottom: 1px solid var(--cv-border);
-    margin-bottom: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.12s;
+    border-radius: 6px;
+}
+
+.cv-group-header:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.cv-group-toggle {
+    display: inline-flex;
+    color: var(--cv-text-secondary);
+    transition: transform 0.18s ease;
+    width: 14px;
+    flex-shrink: 0;
+}
+
+.cv-group.is-open .cv-group-toggle {
+    transform: rotate(90deg);
+}
+
+.cv-group-list {
+    display: none;
+    padding: 4px 0 14px;
+}
+
+.cv-group.is-open .cv-group-list {
+    display: flex;
 }
 
 .cv-group-avatar {
