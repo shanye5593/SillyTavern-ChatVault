@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -18,9 +18,9 @@ const DEFAULT_SETTINGS = {
     theme: 'dark',
     // 导出 txt 时的剥离规则（默认全关，用户需自己开）
     strip: {
-        thinking: false,        // <thinking>...</thinking>
-        think: false,           // <think>...</think>
-        htmlComment: false,     // <!-- ... -->
+        thinking: true,         // <thinking>...</thinking>
+        think: true,            // <think>...</think>
+        htmlComment: true,      // <!-- ... -->
         custom: [],             // [{open: '<details>', close: '</details>'}, ...]
     },
 };
@@ -1208,11 +1208,11 @@ function openEditModal(character, fileName) {
                     </button>
                     <div class="cv-collapse-body">
                         <div class="cv-export-row">
-                            <button class="cv-btn" id="cv_m_export_jsonl" type="button">${ICONS.download}<span>jsonl（原汁原味）</span></button>
-                            <button class="cv-btn" id="cv_m_export_txt" type="button">${ICONS.download}<span>txt（人类可读）</span></button>
+                            <button class="cv-btn" id="cv_m_export_jsonl" type="button">${ICONS.download}<span>jsonl</span></button>
+                            <button class="cv-btn" id="cv_m_export_txt" type="button">${ICONS.download}<span>txt</span></button>
                         </div>
                         <div class="cv-strip-box">
-                            <div class="cv-strip-title">导出 txt 时剥离以下标签内的内容（默认全关）</div>
+                            <div class="cv-strip-title">导出 txt 时剥离以下标签内的内容</div>
                             ${swRow('cv_strip_thinking', stripCfg.thinking, '&lt;thinking&gt;…&lt;/thinking&gt;')}
                             ${swRow('cv_strip_think', stripCfg.think, '&lt;think&gt;…&lt;/think&gt;')}
                             ${swRow('cv_strip_html', stripCfg.htmlComment, 'HTML 注释 &lt;!-- … --&gt;')}
