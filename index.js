@@ -62,22 +62,36 @@ async function fetchAllCharacters() {
 }
 
 async function fetchChatsFor(avatar) {
-    const res = await fetch('/api/characters/chats', {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ avatar_url: avatar, simple: true }),
-    });
-    if (!res.ok) {
-        // 兼容旧版 API
-        const res2 = await fetch('/api/chats/getall', {
+    let lastErr = null;
+    // 新版 API
+    try {
+        const res = await fetch('/api/characters/chats', {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({ avatar_url: avatar, simple: true }),
+        });
+        if (res.ok) return await res.json();
+        lastErr = new Error(`HTTP ${res.status}`);
+    } catch (e) { lastErr = e; }
+    // 兼容旧版 API
+    try {
+        const res = await fetch('/api/chats/getall', {
             method: 'POST',
             headers: headers(),
             body: JSON.stringify({ avatar_url: avatar }),
         });
-        if (!res2.ok) return [];
-        return await res2.json();
-    }
-    return await res.json();
+        if (res.ok) return await res.json();
+        lastErr = new Error(`HTTP ${res.status}`);
+    } catch (e) { lastErr = e; }
+    throw lastErr || new Error('未知错误');
+}
+
+// 规范化：file_name 在不同 ST 版本里可能带或不带 .jsonl
+function stripExt(name) {
+    return String(name || '').replace(/\.jsonl$/i, '');
+}
+function withExt(name) {
+    return stripExt(name) + '.jsonl';
 }
 
 async function renameChat(avatar, oldName, newName) {
@@ -86,8 +100,8 @@ async function renameChat(avatar, oldName, newName) {
         headers: headers(),
         body: JSON.stringify({
             avatar_url: avatar,
-            original_file: `${oldName}.jsonl`,
-            renamed_file: `${newName}.jsonl`,
+            original_file: withExt(oldName),
+            renamed_file: withExt(newName),
         }),
     });
     if (!res.ok) throw new Error(`重命名失败: ${res.status}`);
@@ -99,7 +113,7 @@ async function deleteChat(avatar, fileName) {
         headers: headers(),
         body: JSON.stringify({
             avatar_url: avatar,
-            chatfile: `${fileName}.jsonl`,
+            chatfile: withExt(fileName),
         }),
     });
     if (!res.ok) throw new Error(`删除失败: ${res.status}`);
@@ -110,24 +124,37 @@ async function deleteChat(avatar, fileName) {
 async function jumpToChat(character, fileName) {
     try {
         const ctx = SillyTavern.getContext();
-        const chid = ctx.characters.findIndex(c => c.avatar === character.avatar);
-        if (chid < 0) throw new Error('找不到角色');
+        // 用 avatar + name 双重匹配，处理重复头像的情况
+        const candidates = ctx.characters
+            .map((c, idx) => ({ c, idx }))
+            .filter(({ c }) => c.avatar === character.avatar);
+        let target = candidates.find(({ c }) => c.name === character.name) || candidates[0];
+        if (!target) throw new Error('找不到角色（可能已被删除）');
+        const chid = target.idx;
 
         // 切换到角色
-        if (typeof ctx.selectCharacterById === 'function') {
-            await ctx.selectCharacterById(chid);
-        } else if (typeof window.selectCharacterById === 'function') {
-            await window.selectCharacterById(chid);
+        const select = ctx.selectCharacterById || window.selectCharacterById;
+        if (typeof select !== 'function') {
+            throw new Error('当前 ST 版本不支持自动切换角色');
         }
+        await select(chid);
 
-        // 打开指定聊天
+        // 等待角色切换完成
+        const ok = await waitFor(() => {
+            const c = SillyTavern.getContext();
+            return Number(c.characterId) === chid;
+        }, 3000);
+        if (!ok) throw new Error('角色切换超时');
+
+        // 打开指定聊天（不带扩展名）
+        const target2 = stripExt(fileName);
         const open = ctx.openCharacterChat || window.openCharacterChat;
         if (typeof open === 'function') {
-            await open(fileName);
+            await open(target2);
         } else if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
-            await ctx.executeSlashCommandsWithOptions(`/chat-jump file="${fileName}"`);
+            await ctx.executeSlashCommandsWithOptions(`/chat-jump file="${target2}"`);
         } else {
-            toastr.warning('已切换角色，但无法直接打开该聊天，请手动选择');
+            toastr.warning('已切换角色，但当前 ST 版本无法直接打开指定聊天，请手动选择');
             return;
         }
         closePanel();
@@ -137,11 +164,24 @@ async function jumpToChat(character, fileName) {
     }
 }
 
+function waitFor(predicate, timeout = 3000, interval = 50) {
+    return new Promise(resolve => {
+        const start = Date.now();
+        const tick = () => {
+            try { if (predicate()) return resolve(true); } catch {}
+            if (Date.now() - start >= timeout) return resolve(false);
+            setTimeout(tick, interval);
+        };
+        tick();
+    });
+}
+
 // ---------- UI ----------
 
 let panelEl = null;
 let charactersCache = [];
 let chatsByAvatar = {}; // { avatar: [{file_name, last_mes, mes, ...}] }
+let errorsByAvatar = {}; // { avatar: 'error message' }
 let onlyStarred = false;
 
 function openPanel() {
@@ -214,6 +254,7 @@ async function loadAll() {
         setStatus(`共 ${charactersCache.length} 个角色，正在加载聊天档案…`);
 
         chatsByAvatar = {};
+        errorsByAvatar = {};
         let done = 0;
         const concurrency = 6;
         const queue = [...charactersCache];
@@ -223,19 +264,29 @@ async function loadAll() {
                 const c = queue.shift();
                 try {
                     const list = await fetchChatsFor(c.avatar);
-                    chatsByAvatar[c.avatar] = Array.isArray(list) ? list : [];
+                    // 统一去掉 .jsonl 后缀，避免不同版本返回不一致
+                    chatsByAvatar[c.avatar] = (Array.isArray(list) ? list : []).map(ch => ({
+                        ...ch,
+                        file_name: stripExt(ch.file_name),
+                    }));
                 } catch (e) {
                     chatsByAvatar[c.avatar] = [];
+                    errorsByAvatar[c.avatar] = e.message || String(e);
+                    console.warn('[ChatVault] 角色聊天加载失败:', c.name, e);
                 }
                 done++;
-                setStatus(`已加载 ${done} / ${charactersCache.length} 个角色的聊天档案…`);
+                if (done % 5 === 0 || done === charactersCache.length) {
+                    setStatus(`已加载 ${done} / ${charactersCache.length} 个角色的聊天档案…`);
+                }
             }
         }
 
         await Promise.all(Array.from({ length: concurrency }, worker));
 
         const totalChats = Object.values(chatsByAvatar).reduce((s, a) => s + a.length, 0);
-        setStatus(`✅ 共 ${charactersCache.length} 个角色，${totalChats} 条聊天档案`);
+        const errCount = Object.keys(errorsByAvatar).length;
+        const errSuffix = errCount ? `，⚠️ ${errCount} 个角色加载失败` : '';
+        setStatus(`✅ 共 ${charactersCache.length} 个角色，${totalChats} 条聊天档案${errSuffix}`);
         render('');
     } catch (e) {
         console.error('[ChatVault] 加载失败', e);
@@ -306,13 +357,18 @@ function render(query) {
             ? `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`
             : '';
 
+        const errMsg = errorsByAvatar[c.avatar];
+        const errBadge = errMsg
+            ? `<span class="cv-char-count" style="color:#e57373" title="${escapeHtml(errMsg)}">⚠️ 加载失败</span>`
+            : `<span class="cv-char-count">${filteredChats.length} / ${chats.length} 条聊天</span>`;
+
         html += `
             <div class="cv-char ${expanded}" data-avatar="${escapeHtml(c.avatar)}">
                 <div class="cv-char-header">
                     <span class="cv-char-toggle">▶</span>
                     <img class="cv-char-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" />
                     <span class="cv-char-name">${highlight(c.name || '(无名)', q)}</span>
-                    <span class="cv-char-count">${filteredChats.length} / ${chats.length} 条聊天</span>
+                    ${errBadge}
                 </div>
                 <div class="cv-chats">
                     ${filteredChats.map(ch => {
