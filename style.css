@@ -157,11 +157,26 @@
     color: var(--cv-text-primary);
     white-space: nowrap;
 }
+.cv-titleblock {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    line-height: 1.1;
+}
+.cv-version {
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0;
+    opacity: 0.4;
+    color: var(--cv-text-primary);
+}
 
 .cv-search-wrap {
     position: relative;
     flex: 1;
     max-width: 360px;
+    margin-left: auto;   /* v0.3.22-test: PC 端搜索框靠右贴近操作按钮，避免居中漂浮 */
 }
 
 .cv-search-wrap::before {
@@ -938,4 +953,600 @@
     .cv-actions { opacity: 1; }
     .cv-act-jump span { display: none; }
     .cv-meta-row { gap: 10px; }
+    /* v0.3.18 / v0.3.19: 手机端折叠区 3 按钮强制等宽平铺一行；
+       并用负 margin 让折叠区横跨整张卡片（含 avatar 下方空白），按钮文字才不挤 */
+    .cv-card .cv-fold {
+        flex-wrap: nowrap;
+        gap: 8px;
+        /* avatar 36px + 卡片内 gap 12px = 48px，正好顶到卡片左内边 */
+        margin-left: -48px;
+    }
+    .cv-fold-btn {
+        flex: 1 1 0;
+        min-width: 0;
+        justify-content: center;
+        padding: 7px 10px;
+        white-space: nowrap;
+    }
 }
+
+/* ============================================================
+ * v0.3.0-test  当前聊天高亮 + 折叠区 + 阅读模式
+ * ============================================================ */
+
+/* —— 当前聊天高亮 —— */
+.cv-card.is-active { position: relative; background: var(--cv-active-bg, color-mix(in srgb, var(--cv-accent, #6e8efb) 8%, transparent)); }
+.cv-card.is-active::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--cv-accent, #6e8efb); border-radius: 3px 0 0 3px; }
+.cv-active-badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 6px; margin-right: 6px; border-radius: 999px; background: var(--cv-accent, #6e8efb); color: #fff; vertical-align: middle; }
+.cv-act-jump.is-active { background: var(--cv-accent, #6e8efb); color: #fff; }
+.cv-act-jump.is-active svg { stroke: #fff; }
+
+/* —— 卡片折叠区 —— */
+.cv-card-main { cursor: pointer; }
+.cv-card .cv-fold {
+    display: none;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--cv-border, rgba(255,255,255,0.08));
+}
+.cv-card.is-folded-open .cv-fold { display: flex; }
+.cv-fold-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.12));
+    background: var(--cv-btn-bg, rgba(255,255,255,0.04));
+    color: var(--cv-text, inherit);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+}
+.cv-fold-btn:hover { background: var(--cv-btn-bg-hover, rgba(255,255,255,0.08)); }
+.cv-fold-btn svg { width: 14px; height: 14px; }
+.cv-fold-btn.cv-fold-primary { background: var(--cv-accent, #6e8efb); color: #fff; border-color: transparent; }
+.cv-fold-btn.cv-fold-primary:hover { filter: brightness(1.08); }
+.cv-fold-btn.cv-fold-primary svg { stroke: #fff; }
+
+/* —— 阅读模式：沉浸版 —— */
+
+/* 进入阅读模式时，隐藏面板顶部的所有 chrome */
+#chatvault_panel.cv-in-reader .cv-header,
+#chatvault_panel.cv-in-reader .cv-tabbar,
+#chatvault_panel.cv-in-reader .cv-status { display: none !important; }
+#chatvault_panel.cv-in-reader .cv-body {
+    padding: 0 !important;
+    overflow: hidden;          /* 滚动容器交给 .cv-reader-stage */
+    position: relative;
+}
+
+/* Stage：充满 cv_body，自身是相对定位锚 + 滚动容器 */
+.cv-reader-stage {
+    position: relative;
+    width: 100%; height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: var(--cv-bg-panel, var(--SmartThemeBlurTintColor, transparent));
+    scroll-behavior: smooth;
+}
+.cv-reader-stage::-webkit-scrollbar { width: 8px; }
+.cv-reader-stage::-webkit-scrollbar-thumb { background-color: var(--cv-border, rgba(255,255,255,0.12)); border-radius: 4px; }
+
+/* 浮动按钮：左上返回 / 右上设置；毛玻璃，不抢戏 */
+/* 注意：fab 是 cv_body 的直接子级（不是 stage 的子级），这样它才"真正悬浮"——不随 stage 内容滚动 */
+.cv-reader-fab {
+    position: absolute; top: 16px; z-index: 6;
+    width: 36px; height: 36px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.12));
+    background: color-mix(in srgb, var(--cv-bg-panel, #1f2230) 65%, transparent);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    color: var(--cv-text-primary, inherit);
+    cursor: pointer;
+    transition: background-color .15s, opacity .2s ease, transform .2s ease;
+    opacity: .85;
+}
+.cv-reader-fab:hover { opacity: 1; background: color-mix(in srgb, var(--cv-bg-panel, #1f2230) 85%, transparent); }
+.cv-reader-fab.is-on {
+    opacity: 1;
+    border-color: var(--cv-accent, #6e8efb);
+    color: var(--cv-accent, #6e8efb);
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 14%, var(--cv-bg-panel, #1f2230) 80%);
+}
+.cv-reader-fab svg { width: 16px; height: 16px; }
+.cv-reader-fab-back { left: 16px; }
+.cv-reader-fab-gear { right: 16px; }
+/* autoHide 模式：返回键向左滑出、齿轮向右滑出，与分页器同步 */
+.cv-reader-fab-back.is-hidden { transform: translateX(-160%); opacity: 0; pointer-events: none; }
+.cv-reader-fab-gear.is-hidden { transform: translateX( 160%); opacity: 0; pointer-events: none; }
+
+/* 设置悬浮窗：右上角浮窗，带标题栏 + 关闭，不顶开正文 */
+.cv-reader-settings[hidden] { display: none !important; }   /* 类选择器的 display:flex 会覆盖 [hidden] 的 display:none */
+#chatvault_panel.cv-in-reader .cv-body > .cv-reader-settings {
+    position: absolute; top: 60px; right: 16px; z-index: 7;
+    width: min(440px, calc(100% - 32px));
+    max-height: calc(100% - 80px);
+    overflow: hidden;     /* body 自己滚动 */
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.14));
+    border-radius: 14px;
+    /* v0.3.23-test: 设置面板改为不透明（跳转模块仍保持半透明），避免读取背景文字干扰 */
+    background: var(--cv-bg-panel, #1f2230);
+    box-shadow: 0 18px 48px rgba(0,0,0,0.42);
+    display: flex; flex-direction: column;
+}
+.cv-reader-settings-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px 10px 16px;
+    border-bottom: 1px solid var(--cv-border, rgba(255,255,255,0.08));
+    background: var(--cv-bg-panel, #1f2230);
+}
+/* v0.3.23-test: 设置面板打开时彻底隐藏分页器（淡出） */
+.cv-reader-pager-wrap.cv-pager-suppressed {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .15s ease;
+}
+.cv-reader-settings-title { font-size: 13px; font-weight: 600; opacity: .9; }
+.cv-reader-settings-close {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 0; background: transparent;
+    color: var(--cv-text-primary, inherit); opacity: .7;
+    font-size: 18px; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background-color .15s, opacity .15s;
+}
+.cv-reader-settings-close:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 12%, transparent);
+}
+.cv-reader-settings-body {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding: 14px;
+    display: flex; flex-direction: column; gap: 12px;
+}
+.cv-reader-settings-hint { font-size: 11px; opacity: .55; text-align: center; padding-top: 4px; }
+
+/* user 单独规则区 */
+.cv-user-rules-box .cv-switch-row { padding: 4px 0 6px; }
+.cv-user-rules-body[hidden] { display: none !important; }
+.cv-user-rules-body {
+    margin-top: 8px;
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 10px;
+    border: 1px dashed var(--cv-border, rgba(255,255,255,0.12));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 4%, transparent);
+}
+.cv-strip-subbox { display: flex; flex-direction: column; gap: 4px; }
+.cv-strip-subtitle {
+    font-size: 11px; font-weight: 600; opacity: .7;
+    padding: 2px 0 4px;
+    text-transform: uppercase; letter-spacing: .5px;
+}
+
+/* 阅读区列：居中窄列，桌面留白；手机几乎全宽 */
+.cv-reader-column {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 64px 24px 0;        /* 顶部给浮动按钮让位 */
+}
+
+.cv-reader-loading { padding: 40px 0; text-align: center; opacity: .6; }
+
+/* 顶部小标题块（不是 header bar，只是行内信息） */
+.cv-reader-headinfo {
+    display: flex; align-items: center; gap: 12px;
+    padding: 4px 4px 18px;
+    border-bottom: 1px dashed var(--cv-border, rgba(255,255,255,0.08));
+    margin-bottom: 18px;
+}
+.cv-reader-headinfo-avatar {
+    width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0;
+}
+.cv-reader-headinfo-text { min-width: 0; flex: 1; }
+.cv-reader-headinfo-char { font-size: 11px; opacity: .65; line-height: 1.2; }
+.cv-reader-headinfo-title {
+    font-size: 13px; font-weight: 600; line-height: 1.3;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cv-reader-headinfo-meta { font-size: 11px; opacity: .6; flex-shrink: 0; }
+
+.cv-reader-list { display: flex; flex-direction: column; gap: 14px; }
+
+/* —— 默认：A 卡片流 —— */
+.cv-reader-msg {
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.08));
+    background: var(--cv-card-bg, rgba(255,255,255,0.02));
+    border-radius: 12px;
+    padding: 12px 16px;
+}
+.cv-reader-msg.is-user {
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 6%, transparent);
+    border-color: color-mix(in srgb, var(--cv-accent, #6e8efb) 22%, var(--cv-border, rgba(255,255,255,0.08)));
+}
+.cv-reader-msg-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px; font-size: 12px;
+}
+.cv-reader-msg-avatar {
+    width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--cv-accent, #6e8efb); color: #fff; font-size: 12px; font-weight: 600;
+}
+.cv-reader-user-avatar { background: #888; }
+.cv-reader-msg-who { font-weight: 600; }
+.cv-reader-msg-floor { margin-left: auto; opacity: .5; font-size: 11px; font-variant-numeric: tabular-nums; }
+.cv-reader-msg-body {
+    font-size: var(--cv-reader-font-size, 15px);
+    line-height: 1.85;
+    word-break: break-word; white-space: normal;
+}
+.cv-reader-msg-body .cv-msg-p { margin: 0 0 0.6em; }
+.cv-reader-msg-body .cv-msg-p:last-child { margin-bottom: 0; }
+/* 段落首行缩进（仅当 stage[data-indent="1"]）；空段落不缩进 */
+.cv-reader-stage[data-indent="1"] .cv-reader-msg-body .cv-msg-p { text-indent: 2em; }
+.cv-reader-empty { opacity: .5; font-style: italic; }
+
+/* 字号滑块行 */
+.cv-reader-fontsize-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 4px 0 8px;
+}
+.cv-reader-fontsize-row input[type="range"] {
+    flex: 1; min-width: 0; accent-color: var(--cv-accent, #6e8efb);
+}
+.cv-reader-fontsize-val {
+    font-size: 12px; opacity: .7; font-variant-numeric: tabular-nums;
+    min-width: 42px; text-align: right;
+}
+
+/* 标题旁的"!"说明按钮 + 展开 tip */
+.cv-strip-title { display: flex; align-items: center; gap: 6px; }
+.cv-info-btn {
+    width: 18px; height: 18px; border-radius: 50%;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.3));
+    background: transparent;
+    color: var(--cv-text-primary, inherit); opacity: .55;
+    font-size: 11px; font-weight: 700; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+    transition: opacity .15s, border-color .15s, color .15s, background-color .15s;
+    font-family: serif;
+}
+.cv-info-btn:hover { opacity: 1; }
+.cv-info-btn.is-on {
+    opacity: 1;
+    border-color: var(--cv-accent, #6e8efb);
+    color: var(--cv-accent, #6e8efb);
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 14%, transparent);
+}
+.cv-info-tip[hidden] { display: none !important; }
+.cv-info-tip {
+    margin: 6px 0 8px; padding: 10px 12px;
+    border-left: 3px solid var(--cv-accent, #6e8efb);
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 6%, transparent);
+    border-radius: 0 8px 8px 0;
+    font-size: 12px; line-height: 1.7; opacity: .92;
+}
+.cv-info-tip code {
+    font-size: 11px;
+    padding: 1px 5px; border-radius: 4px;
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 10%, transparent);
+}
+
+/* user 头像绑定 */
+.cv-ua-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 0 2px;
+}
+.cv-ua-preview {
+    width: 56px; height: 56px; border-radius: 50%;
+    overflow: hidden; flex-shrink: 0;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.14));
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 6%, transparent);
+    display: flex; align-items: center; justify-content: center;
+}
+.cv-ua-preview img { width: 100%; height: 100%; object-fit: cover; }
+.cv-ua-empty { font-size: 11px; opacity: .55; text-align: center; }
+.cv-ua-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.cv-ua-status { font-size: 12px; opacity: .8; }
+.cv-ua-status code {
+    font-size: 11px; padding: 1px 5px; border-radius: 4px;
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 10%, transparent);
+    word-break: break-all;
+}
+.cv-ua-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.cv-ua-actions .cv-btn { font-size: 11px; padding: 4px 10px; }
+.cv-btn-danger {
+    border-color: color-mix(in srgb, #e25b5b 40%, var(--cv-border, rgba(255,255,255,0.14)));
+    color: #e88080;
+}
+.cv-btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, #e25b5b 12%, transparent);
+}
+.cv-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* persona 选择网格 */
+.cv-ua-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+    gap: 8px;
+    padding: 6px 0 2px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+.cv-ua-opt {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 6px 4px; border-radius: 8px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.14));
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 3%, transparent);
+    cursor: pointer;
+    transition: border-color .15s, background .15s, transform .12s;
+    user-select: none;
+}
+.cv-ua-opt:hover {
+    border-color: color-mix(in srgb, var(--cv-accent, #6e8efb) 50%, var(--cv-border, rgba(255,255,255,0.14)));
+}
+.cv-ua-opt.is-on {
+    border-color: var(--cv-accent, #6e8efb);
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 14%, transparent);
+}
+.cv-ua-opt-img {
+    width: 52px; height: 52px; border-radius: 50%;
+    object-fit: cover; flex-shrink: 0;
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 8%, transparent);
+}
+.cv-ua-opt-none-icon {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; opacity: .5;
+}
+.cv-ua-opt-name {
+    font-size: 11px; line-height: 1.25;
+    max-width: 100%;
+    text-align: center;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    word-break: break-all;
+}
+
+/* 手动输入兜底 */
+.cv-ua-manual { display: flex; gap: 6px; align-items: center; padding: 6px 0 2px; }
+.cv-ua-manual input[type="text"] {
+    flex: 1; min-width: 0;
+    padding: 6px 10px; font-size: 12px; border-radius: 6px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.14));
+    background: color-mix(in srgb, var(--cv-text-primary, #fff) 4%, transparent);
+    color: var(--cv-text-primary, #fff);
+}
+
+/* 底部留白，给浮动分页器让位 */
+.cv-reader-bottom-spacer { height: 96px; }
+
+/* —— 阅读模式分页器：跳出 stage 滚动容器，固定在 cv_body 底部居中 —— */
+.cv-reader-pager-wrap {
+    position: absolute;
+    left: 0; right: 0; bottom: 16px;
+    display: flex; justify-content: center;
+    pointer-events: none;            /* wrap 不拦截事件 */
+    z-index: 8;
+    transition: transform .2s ease, opacity .2s ease;
+}
+.cv-reader-pager-wrap.is-hidden {
+    transform: translateY(140%);
+    opacity: 0;
+    pointer-events: none;
+}
+.cv-reader-pager {
+    pointer-events: auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 4px;
+    padding: 6px 10px;
+    max-width: calc(100% - 32px);
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.12));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--cv-bg-panel, #1f2230) 78%, transparent);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.32);
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+.cv-pager-btn {
+    min-width: 30px; height: 30px; padding: 0 8px;
+    border-radius: 999px; border: 0;
+    background: transparent;
+    color: var(--cv-text-primary, inherit);
+    cursor: pointer; font-size: 13px;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.cv-pager-btn:disabled { opacity: .3; cursor: not-allowed; }
+.cv-pager-btn:not(:disabled):hover { background: rgba(255,255,255,0.08); }
+.cv-pager-btn svg { width: 14px; height: 14px; }
+.cv-pager-page { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 0 4px; }
+.cv-pager-page input {
+    width: 50px; height: 26px; padding: 0 6px; text-align: center;
+    border-radius: 6px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.15));
+    background: var(--cv-bg-input, rgba(0,0,0,0.22));
+    color: var(--cv-text-primary, inherit); font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+.cv-pager-page input::-webkit-outer-spin-button,
+.cv-pager-page input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.cv-pager-go {
+    padding: 0 12px; height: 26px;
+    border-radius: 999px; border: 0;
+    background: var(--cv-accent, #6e8efb); color: #fff;
+    cursor: pointer; font-size: 12px;
+}
+.cv-pager-go:hover { filter: brightness(1.08); }
+
+/* —— 阅读版式选择 —— */
+.cv-reader-style-row { display: flex; gap: 8px; }
+.cv-reader-style-opt {
+    flex: 1; display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,0.12));
+    border-radius: 8px;
+    background: var(--cv-card-bg, rgba(255,255,255,0.02));
+    cursor: pointer; transition: border-color .15s, background-color .15s;
+    position: relative;
+}
+.cv-reader-style-opt input { position: absolute; opacity: 0; pointer-events: none; }
+.cv-reader-style-opt.is-on,
+.cv-reader-style-opt:has(input:checked) {
+    border-color: var(--cv-accent, #6e8efb);
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 8%, transparent);
+}
+.cv-reader-style-name { font-size: 13px; font-weight: 600; }
+.cv-reader-style-desc { font-size: 11px; opacity: .65; }
+
+@media (max-width: 720px) {
+    .cv-reader-column { padding: 56px 14px 0; max-width: 100%; }
+    .cv-reader-stage[data-reader-style="article"] .cv-reader-column { max-width: 100%; }
+    .cv-reader-headinfo-meta { display: none; }
+    .cv-reader-msg { padding: 10px 12px; }
+    .cv-reader-msg-body { line-height: 1.75; }
+    .cv-reader-stage[data-reader-style="article"] .cv-reader-msg-body { line-height: 1.9; }
+    .cv-reader-fab { width: 32px; height: 32px; top: 10px; }
+    .cv-reader-fab-back { left: 10px; }
+    .cv-reader-fab-gear { right: 10px; }
+    .cv-pager-page input { width: 44px; }
+    .cv-reader-style-row { flex-direction: column; }
+}
+
+/* ============================================================
+ *  导出 modal —— 卡片式两个选项
+ * ============================================================ */
+.cv-export-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+.cv-export-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 14px 14px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,.1));
+    background: var(--cv-bg-soft, rgba(255,255,255,.03));
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color .15s, background .15s, transform .05s;
+}
+.cv-export-card:hover {
+    border-color: var(--cv-accent, #6e8efb);
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 8%, transparent);
+}
+.cv-export-card:active { transform: scale(.99); }
+.cv-export-card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--cv-accent, #6e8efb) 14%, transparent);
+    color: var(--cv-accent, #6e8efb);
+}
+.cv-export-card-title {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: .3px;
+}
+.cv-export-card-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    opacity: .75;
+}
+@media (max-width: 480px) {
+    .cv-export-grid { grid-template-columns: 1fr; }
+}
+
+/* 导出 modal: 宽一点容纳规则编辑器 + 折叠区样式 */
+.cv-modal.cv-modal-wide { max-width: 720px; width: calc(100vw - 40px); }
+.cv-export-rules {
+    margin-top: 14px;
+    border: 1px solid var(--cv-border, rgba(255,255,255,.1));
+    border-radius: 10px;
+    background: var(--cv-bg-soft, rgba(255,255,255,.02));
+}
+.cv-export-rules > summary {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    list-style: none;
+    user-select: none;
+    color: var(--cv-text, inherit);
+    display: flex; align-items: center; gap: 6px;
+}
+.cv-export-rules > summary::-webkit-details-marker { display: none; }
+.cv-export-rules > summary::before {
+    content: '▸';
+    font-size: 11px;
+    transition: transform .15s;
+    opacity: .6;
+}
+.cv-export-rules[open] > summary::before { transform: rotate(90deg); }
+.cv-export-rules-body {
+    padding: 6px 14px 14px;
+    border-top: 1px solid var(--cv-border, rgba(255,255,255,.08));
+}
+.cv-export-rules-body .cv-strip-box { background: transparent; }
+
+/* v0.3.14: 摘取规则 modal 与提示文字
+   v0.3.24-test: 改用三套主题都已定义的 --cv-text-tertiary / --cv-bg-elev
+   原本的 --cv-text-dim / --cv-fold-bg 三套主题里都没定义，fallback rgba(255,255,255,0.6) 在 light/coffee 下白底白字看不见 */
+.cv-export-hint,
+.cv-rules-modal-hint {
+    margin: 10px 0 4px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--cv-text-tertiary, #6b7280) 8%, transparent);
+    color: var(--cv-text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+.cv-rules-modal-hint { margin-bottom: 12px; }
+
+/* v0.3.15: PC 端双列网格 —— 把长条卡片变成方块块。
+   v0.3.16: 扩展到所有 tab，包含「按角色」tab 内的 cv-group-list（要用更高的选择器特异性盖掉 .cv-group.is-open .cv-group-list 的 flex） */
+@media (min-width: 721px) {
+    .cv-list-grid,
+    .cv-group.is-open .cv-list-grid.cv-group-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        align-items: start;
+    }
+}
+
+/* v0.3.21-test: header 右侧两个图标按钮放进一个 flex 容器，避免被 space-between 推开 */
+.cv-header-actions { display: flex; align-items: center; gap: 4px; }
+
+/* v0.3.20-flash: 标题栏手动刷新按钮 + 旋转动画 */
+.cv-refresh-btn { font-size: 0; position: relative; }
+.cv-refresh-btn svg { width: 18px; height: 18px; }
+.cv-refresh-btn.is-spinning svg { animation: cv-spin 0.8s linear infinite; }
+@keyframes cv-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+/* v0.3.23-flash: 快照状态指示挪到版本号旁边的小圆点（避免诱导点击刷新键）*/
+.cv-snapshot-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-left: 6px;
+    background: transparent;
+    vertical-align: middle;
+    transition: background-color 0.2s;
+}
+.cv-snapshot-dot.is-on { background: var(--cv-accent, #4ade80); }
