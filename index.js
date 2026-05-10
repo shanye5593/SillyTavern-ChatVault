@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -2067,6 +2067,7 @@ function renderReaderSettings(panel) {
                                     <span class="cv-bm-floor">#${b.idx}</span>
                                     <span class="cv-bm-text">${escapeHtml(b.note || `楼层 ${b.idx}`)}</span>
                                 </button>
+                                <button class="cv-bm-edit" type="button" title="编辑备注">${ICONS.edit}</button>
                                 <button class="cv-bm-del" type="button" title="删除">${ICONS.trash}</button>
                             </div>
                         `).join('');
@@ -2233,11 +2234,17 @@ function renderReaderSettings(panel) {
     panel.querySelectorAll('.cv-bm-item').forEach(item => {
         const idx = Number(item.dataset.idx);
         const jump = item.querySelector('.cv-bm-jump');
+        const edit = item.querySelector('.cv-bm-edit');
         const del  = item.querySelector('.cv-bm-del');
         if (jump) jump.onclick = (e) => {
             e.stopPropagation();
             const b = (rChar.avatar && rFile) ? findBookmark(rChar.avatar, rFile, idx) : null;
             if (b) jumpToBookmark(b);
+        };
+        if (edit) edit.onclick = (e) => {
+            e.stopPropagation();
+            const b = (rChar.avatar && rFile) ? findBookmark(rChar.avatar, rFile, idx) : null;
+            if (b) openBookmarkModal(idx, b);
         };
         if (del) del.onclick = (e) => {
             e.stopPropagation();
