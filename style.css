@@ -2065,6 +2065,7 @@
     text-overflow: ellipsis;
     min-width: 0;
 }
+.cv-bm-edit,
 .cv-bm-del {
     background: transparent;
     border: 0;
@@ -2078,11 +2079,17 @@
     justify-content: center;
     transition: background .15s, color .15s, opacity .15s;
 }
+.cv-bm-edit:hover {
+    opacity: 1;
+    color: var(--cv-accent);
+    background: var(--cv-accent-muted);
+}
 .cv-bm-del:hover {
     opacity: 1;
     color: var(--cv-danger);
     background: var(--cv-danger-bg);
 }
+.cv-bm-edit svg,
 .cv-bm-del svg { width: 14px; height: 14px; }
 
 
