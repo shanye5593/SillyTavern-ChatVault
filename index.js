@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.3.24-test';
+const VERSION = '0.4.0';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -12,6 +12,7 @@ const THEMES = [
     { id: 'dark',   name: '夜间 Dark' },
     { id: 'light',  name: '白底 Light' },
     { id: 'coffee', name: '咖啡 Coffee' },
+    { id: 'custom', name: '自定义' },
 ];
 const DEFAULT_STRIP = {
     thinking: true,
@@ -56,6 +57,16 @@ const DEFAULT_SETTINGS = {
     readerFontSize: 15,
     // 阅读模式段落首行缩进
     readerIndent: false,
+    // 自定义字体（v0.3.31 起改成多字体优先级数组：[{family, url}, ...]）
+    customFonts: [],
+    // 自定义配色（v0.3.32 起；只覆盖填了的字段，其它跟随主题）
+    // 形如 { accent:'#34d399', bgPanel:'#212327', bgCard:'#2a2d32', text:'#e4e5e7', overlayAlpha:0.55 }
+    customColors: {},
+    // 桌面窗口模式（v0.3.27 起，仅桌面端生效，手机端完全跳过）
+    windowFreeMode: false,             // 自由模式：去掉遮罩，可同时操作酒馆
+    windowHotkey: false,               // 是否启用全局快捷键开关面板
+    windowHotkeyCombo: 'Alt+V',        // 快捷键组合
+    windowState: null,                 // 记忆位置：{ x, y, scale }
 };
 
 function loadSettings() {
@@ -69,6 +80,12 @@ function loadSettings() {
             delete s.readStrip; delete s.readExtract; delete s.userReadRules;
             try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch {}
         }
+        // v0.3.31 迁移：单字体 -> 数组
+        if (!Array.isArray(s.customFonts)) s.customFonts = [];
+        if (s.customFonts.length === 0 && (s.customFontFamily || s.customFontUrl)) {
+            s.customFonts = [{ family: String(s.customFontFamily || ''), url: String(s.customFontUrl || '') }];
+        }
+        delete s.customFontFamily; delete s.customFontUrl;
         return s;
     } catch {
         return { ...DEFAULT_SETTINGS };
@@ -88,13 +105,21 @@ function currentThemeClass() {
 
 function loadMeta() {
     try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        const v = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        // 防御：localStorage 可能被外部脚本/插件冲突写入非对象，避免后续 m[k]=... 直接崩
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+        return v;
     } catch {
         return {};
     }
 }
 function saveMeta(meta) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(meta));
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(meta));
+    } catch (e) {
+        // quota exceeded / 隐私模式 / 磁盘满：仅警告，不让整个交互崩
+        console.warn('[ChatVault] saveMeta failed:', e);
+    }
 }
 function metaKey(avatar, fileName) {
     return `${avatar}::${fileName}`;
@@ -511,8 +536,17 @@ function openPanel() {
             </div>
         </div>
     `;
-    panelEl.addEventListener('click', closePanel);
+    panelEl.addEventListener('click', (e) => {
+        // 拖动/拉伸刚结束时浏览器可能补一个 click 到遮罩上，忽略掉防止误关
+        if (_cvSuppressOverlayClick) return;
+        closePanel();
+    });
     document.body.appendChild(panelEl);
+
+    // 桌面窗口模式：装把手、还原位置、绑定拖拽/拉伸（手机端内部直接 return）
+    const _panel = document.getElementById('chatvault_panel');
+    applyWindowState(panelEl, _panel);
+    initWindowChrome(panelEl, _panel);
 
     document.getElementById('cv_close').onclick = closePanel;
     document.getElementById('cv_refresh').onclick = (e) => {
@@ -567,8 +601,19 @@ function escHandler(e) {
 
 function closePanel() {
     if (previewObserver) { previewObserver.disconnect(); previewObserver = null; }
+    // 移除 PC 端 window resize 监听，避免反复开关导致监听器堆积
+    if (panelEl && panelEl._cvOnResize) {
+        window.removeEventListener('resize', panelEl._cvOnResize);
+        panelEl._cvOnResize = null;
+    }
     if (panelEl) { panelEl.remove(); panelEl = null; }
     document.removeEventListener('keydown', escHandler);
+    // 重置阅读模式状态——否则下次打开 render() 会因为 readerState.active=true 直接进入旧阅读视图
+    readerState.active = false;
+    readerState.arr = null;
+    readerState._processed = null;
+    readerState._cfgSig = null;
+    readerState.settingsOpen = false;
     // 关闭面板时清空搜索词，避免下次打开时旧搜索仍然生效但输入框为空
     searchQuery = '';
     currentPage = 1;
@@ -611,14 +656,17 @@ async function loadAll() {
 
         async function worker() {
             while (queue.length) {
+                if (loadToken !== loadAllToken) return;   // 早退：被新一轮 loadAll 抢占
                 const c = queue.shift();
                 try {
                     const list = await fetchChatsFor(c.avatar);
+                    if (loadToken !== loadAllToken) return;   // fetch 完成时再核一次，避免污染新对象
                     chatsByAvatar[c.avatar] = (Array.isArray(list) ? list : []).map(ch => ({
                         ...ch,
                         file_name: stripExt(ch.file_name),
                     }));
                 } catch (e) {
+                    if (loadToken !== loadAllToken) return;
                     chatsByAvatar[c.avatar] = [];
                     errorsByAvatar[c.avatar] = e.message || String(e);
                     console.warn('[ChatVault] 角色聊天加载失败:', c.name, e);
@@ -1209,8 +1257,10 @@ const readerState = {
     settingsOpen: false,
 };
 
+let _readerToken = 0;
 async function enterReader(character, fileName) {
     if (!character || !fileName) return;
+    const myToken = ++_readerToken;
     // 进入阅读模式前记录列表滚动位置，退出后恢复，避免回滚到顶
     const bodyEl = document.getElementById('cv_body');
     readerState.bodyScrollBefore = bodyEl ? bodyEl.scrollTop : 0;
@@ -1226,11 +1276,16 @@ async function enterReader(character, fileName) {
     const panel = document.getElementById('chatvault_panel');
     if (panel) panel.classList.add('cv-in-reader');
     renderReader();
+    let arr;
     try {
-        readerState.arr = await fetchFullChat(character, fileName);
+        arr = await fetchFullChat(character, fileName);
     } catch (e) {
-        readerState.arr = { error: e.message || String(e) };
+        arr = { error: e.message || String(e) };
     }
+    // 防竞态：旧请求晚返回时，token 已被新一次 enterReader 抢占，丢弃
+    if (myToken !== _readerToken) return;
+    if (!readerState.active) return;
+    readerState.arr = arr;
     renderReader();
 }
 
@@ -1255,6 +1310,7 @@ function readerCfg() {
     const cfg = loadSettings();
     const u = { ...DEFAULT_USER_RULES, ...(cfg.userRules || {}) };
     const fs = Number(cfg.readerFontSize);
+    const hs = Number(cfg.readerHeadScale);
     return {
         strip:   { ...DEFAULT_STRIP,   ...(cfg.strip   || {}) },
         extract: { ...DEFAULT_EXTRACT, ...(cfg.extract || {}) },
@@ -1264,7 +1320,8 @@ function readerCfg() {
             extract: { ...DEFAULT_EXTRACT, ...(u.extract || {}) },
         },
         pagerMode: cfg.readerPagerMode === 'always' ? 'always' : 'autoHide',
-        fontSize: (Number.isFinite(fs) && fs >= 12 && fs <= 24) ? fs : 15,
+        fontSize: (Number.isFinite(fs) && fs >= 12 && fs <= 28) ? fs : 15,
+        headScale: (Number.isFinite(hs) && hs >= 0.8 && hs <= 1.8) ? hs : 1.0,
         indent: !!cfg.readerIndent,
     };
 }
@@ -1280,7 +1337,7 @@ function renderReader() {
 
     // 悬浮覆层（按钮 + 设置面板 + 分页器都从 stage 移出，作为 cv_body 的直接子节点）
     // 这样它们才真正"悬浮"——不会随 stage 滚动消失
-    const stageStyle = `--cv-reader-font-size:${cfgPre.fontSize}px`;
+    const stageStyle = `--cv-reader-font-size:${cfgPre.fontSize}px;--cv-reader-head-scale:${cfgPre.headScale}`;
     const stageOpen = `<div class="cv-reader-stage" data-pager-mode="${cfgPre.pagerMode}" data-indent="${cfgPre.indent ? '1' : '0'}" style="${stageStyle}"><div class="cv-reader-column">`;
     const stageClose = `</div></div>`;
     const overlayHtml = `
@@ -1758,10 +1815,17 @@ function renderReaderSettings(panel) {
             <div class="cv-strip-box">
                 <div class="cv-strip-title">正文字号</div>
                 <div class="cv-reader-fontsize-row">
-                    <input type="range" id="cv_r_fontsize" min="13" max="22" step="0.5" value="${cfg.readerFontSize || 15}"/>
+                    <input type="range" id="cv_r_fontsize" min="13" max="28" step="0.5" value="${cfg.readerFontSize || 15}"/>
                     <span class="cv-reader-fontsize-val" id="cv_r_fontsize_val">${cfg.readerFontSize || 15}px</span>
                 </div>
                 ${sw('cv_r_indent', !!cfg.readerIndent, '段落首行缩进 2 字')}
+            </div>
+            <div class="cv-strip-box" id="cv_r_headscale_box">
+                <div class="cv-strip-title">卡片头部大小（头像 / 角色名 / 楼层号）</div>
+                <div class="cv-reader-fontsize-row">
+                    <input type="range" id="cv_r_headscale" min="0.8" max="1.8" step="0.05" value="${(Number(cfg.readerHeadScale) || 1).toFixed(2)}"/>
+                    <span class="cv-reader-fontsize-val" id="cv_r_headscale_val">${Math.round((Number(cfg.readerHeadScale) || 1) * 100)}%</span>
+                </div>
             </div>
             <div class="cv-strip-box">
                 <div class="cv-strip-title">
@@ -1837,6 +1901,23 @@ function renderReaderSettings(panel) {
         };
         fsInput.oninput  = () => apply(false);
         fsInput.onchange = () => apply(true);
+    }
+    // 卡片头部缩放滑块
+    const hsInput = document.getElementById('cv_r_headscale');
+    const hsVal   = document.getElementById('cv_r_headscale_val');
+    if (hsInput) {
+        const apply = (save) => {
+            const v = Math.max(0.8, Math.min(1.8, Number(hsInput.value) || 1));
+            if (hsVal) hsVal.textContent = Math.round(v * 100) + '%';
+            const stage = document.querySelector('.cv-reader-stage');
+            if (stage) stage.style.setProperty('--cv-reader-head-scale', String(v));
+            if (save) {
+                const c = loadSettings();
+                saveSettings({ ...c, readerHeadScale: v });
+            }
+        };
+        hsInput.oninput  = () => apply(false);
+        hsInput.onchange = () => apply(true);
     }
     // 首行缩进开关
     const indentSw = document.getElementById('cv_r_indent');
@@ -2282,6 +2363,347 @@ function applyEnabledState() {
 }
 
 /* ============================================================
+ *  自定义字体（注入 <style>，全局作用于 ChatVault 面板）
+ * ============================================================ */
+
+/* ============================================================
+ *  桌面窗口模式（v0.3.27 起）
+ *  - 默认仍是模态居中卡片
+ *  - 桌面端额外允许：拖标题栏移动 / 拉边缘改大小 / 双击最大化 / 复位
+ *  - 自由模式：去掉遮罩，可同时操作酒馆
+ *  - 手机端（≤720px）完全跳过，保留原有满屏体验
+ * ============================================================ */
+
+let _cvSuppressOverlayClick = false;
+
+function isMobileLayout() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 720px)').matches);
+}
+
+/* ----- v0.3.30-test：改成 transform: scale 等比缩放 -----
+ * - 状态从 {x,y,w,h} 改成 {x,y,scale}
+ * - scale 范围 0.4 ~ 3.0（v0.3.31 起；移除了双击最大化以避免误触）
+ * - 内部布局始终按"原生像素"排版，不会因为缩放错乱
+ */
+const CV_MIN_SCALE = 0.4;
+const CV_MAX_SCALE = 3.0;
+
+function ensureNativeSize(panel) {
+    if (panel._cvNative) return panel._cvNative;
+    // 测量必须在 transform 应用之前；此函数被首次调用时面板还没缩放过
+    const prev = panel.style.transform;
+    if (prev) panel.style.removeProperty('transform');
+    const r = panel.getBoundingClientRect();
+    panel._cvNative = { w: Math.round(r.width), h: Math.round(r.height) };
+    if (prev) panel.style.setProperty('transform', prev, 'important');
+    return panel._cvNative;
+}
+
+function clampState(state, nativeW, nativeH) {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let scale = Math.max(CV_MIN_SCALE, Math.min(CV_MAX_SCALE, state.scale));
+    // 屏幕装不下当前 scale 时进一步压低
+    const maxFit = Math.min(vw / nativeW, vh / nativeH);
+    if (scale > maxFit) scale = maxFit;
+    const visW = nativeW * scale, visH = nativeH * scale;
+    let x = visW >= vw ? 0 : Math.max(0, Math.min(state.x, vw - visW));
+    let y = visH >= vh ? 0 : Math.max(0, Math.min(state.y, vh - visH));
+    return { x, y, scale };
+}
+
+function applyTransform(panel, state) {
+    const { w, h } = ensureNativeSize(panel);
+    const c = clampState(state, w, h);
+    panel.style.setProperty('left',   c.x + 'px', 'important');
+    panel.style.setProperty('top',    c.y + 'px', 'important');
+    panel.style.setProperty('transform', `scale(${c.scale})`, 'important');
+    panel.style.setProperty('transform-origin', 'top left', 'important');
+    return c;
+}
+
+function getCurrentState(panel) {
+    const left = parseFloat(panel.style.left) || 0;
+    const top  = parseFloat(panel.style.top)  || 0;
+    const m = /scale\(([0-9.]+)\)/.exec(panel.style.transform || '');
+    const scale = m ? parseFloat(m[1]) : 1;
+    return { x: left, y: top, scale };
+}
+
+function saveWindowStatePartial(patch) {
+    const s = loadSettings();
+    const cur = { ...(s.windowState || {}) };
+    // 清掉旧版本残留的 w/h/maximized 字段
+    delete cur.w; delete cur.h; delete cur.maximized;
+    saveSettings({ ...s, windowState: { ...cur, ...patch } });
+}
+
+function applyWindowState(overlay, panel) {
+    if (isMobileLayout()) return;
+    const s = loadSettings();
+    if (s.windowFreeMode) overlay.classList.add('cv-window-free');
+    const st = s.windowState;
+    if (st && typeof st.x === 'number' && typeof st.y === 'number' && typeof st.scale === 'number') {
+        // 在应用 transform 之前先量原生尺寸
+        ensureNativeSize(panel);
+        overlay.classList.add('cv-window-positioned');
+        applyTransform(panel, st);
+    }
+}
+
+function _ensurePositioned(overlay, panel) {
+    if (overlay.classList.contains('cv-window-positioned')) return;
+    // 进入定位模式之前，面板还在 flex 居中状态，量出当前位置作为起点
+    const r = panel.getBoundingClientRect();
+    ensureNativeSize(panel);
+    overlay.classList.add('cv-window-positioned');
+    applyTransform(panel, { x: Math.round(r.left), y: Math.round(r.top), scale: 1 });
+}
+
+function _onPointerEnd(panel, cleanup) {
+    cleanup();
+    saveWindowStatePartial(getCurrentState(panel));
+    _cvSuppressOverlayClick = true;
+    setTimeout(() => { _cvSuppressOverlayClick = false; }, 50);
+}
+
+function _bindDrag(panel, overlay, handle) {
+    handle.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('input, button, select, textarea, a')) return;
+        if (e.button !== 0) return;
+        e.preventDefault();
+        _ensurePositioned(overlay, panel);
+        const startX = e.clientX, startY = e.clientY;
+        const startState = getCurrentState(panel);
+        const move = (ev) => {
+            applyTransform(panel, {
+                x: startState.x + (ev.clientX - startX),
+                y: startState.y + (ev.clientY - startY),
+                scale: startState.scale,
+            });
+        };
+        const up = () => _onPointerEnd(panel, () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+        });
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    });
+}
+
+function _bindScaleResize(panel, overlay, handle) {
+    handle.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        _ensurePositioned(overlay, panel);
+        const startX = e.clientX, startY = e.clientY;
+        const startState = getCurrentState(panel);
+        const { w: nativeW, h: nativeH } = ensureNativeSize(panel);
+        const move = (ev) => {
+            const dx = ev.clientX - startX;
+            const dy = ev.clientY - startY;
+            // 取水平/垂直拖动量中较大的那个作为缩放参考，无论沿哪个方向拖都跟手
+            const delta = Math.max(dx / nativeW, dy / nativeH);
+            applyTransform(panel, {
+                x: startState.x,
+                y: startState.y,
+                scale: startState.scale + delta,
+            });
+        };
+        const up = () => _onPointerEnd(panel, () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+        });
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    });
+}
+
+function initWindowChrome(overlay, panel) {
+    if (isMobileLayout()) return;
+
+    // 只保留右下角一个缩放把手
+    const seHandle = document.createElement('div');
+    seHandle.className = 'cv-resize-handle cv-rh-se';
+    seHandle.dataset.dir = 'se';
+    panel.appendChild(seHandle);
+    _bindScaleResize(panel, overlay, seHandle);
+
+    // 阅读模式下顶部一条窄拖动条（普通模式靠 header）
+    const dragStrip = document.createElement('div');
+    dragStrip.className = 'cv-drag-strip';
+    panel.appendChild(dragStrip);
+    _bindDrag(panel, overlay, dragStrip);
+
+    // 标题栏拖动（不再绑 dblclick；双击最大化已移除以避免误触发）
+    const header = panel.querySelector('.cv-header');
+    if (header) _bindDrag(panel, overlay, header);
+
+    // 视口尺寸变化：重新夹回
+    const onWinResize = () => {
+        if (isMobileLayout()) return;
+        if (!overlay.classList.contains('cv-window-positioned')) return;
+        applyTransform(panel, getCurrentState(panel));
+    };
+    window.addEventListener('resize', onWinResize);
+    // 把引用挂到 panel 上，closePanel 时拆除，避免反复开关后监听器堆积
+    panel._cvOnResize = onWinResize;
+}
+
+function resetWindow() {
+    const s = loadSettings();
+    delete s.windowState;
+    saveSettings(s);
+    if (!panelEl) return;
+    const panel = document.getElementById('chatvault_panel');
+    if (!panel) return;
+    panelEl.classList.remove('cv-window-positioned');
+    panel.style.removeProperty('left');
+    panel.style.removeProperty('top');
+    panel.style.removeProperty('transform');
+    panel.style.removeProperty('transform-origin');
+    panel.style.removeProperty('width');
+    panel.style.removeProperty('height');
+    // 让下次拖动重新测量原生尺寸（视口可能已经变化）
+    delete panel._cvNative;
+}
+
+function parseHotkeyCombo(str) {
+    if (!str) return null;
+    const parts = String(str).split('+').map(s => s.trim()).filter(Boolean);
+    if (!parts.length) return null;
+    const key = parts.pop().toLowerCase();
+    const mods = new Set(parts.map(s => s.toLowerCase()));
+    return { key, ctrl: mods.has('ctrl'), alt: mods.has('alt'),
+             shift: mods.has('shift'), meta: mods.has('meta') || mods.has('cmd') };
+}
+
+function matchHotkey(e, combo) {
+    if (!combo) return false;
+    const k = (e.key || '').toLowerCase();
+    return k === combo.key
+        && !!e.ctrlKey  === combo.ctrl
+        && !!e.altKey   === combo.alt
+        && !!e.shiftKey === combo.shift
+        && !!e.metaKey  === combo.meta;
+}
+
+function setupHotkey() {
+    if (window._cvHotkeyBound) return;
+    window._cvHotkeyBound = true;
+    document.addEventListener('keydown', (e) => {
+        const s = loadSettings();
+        if (!s.windowHotkey) return;
+        const combo = parseHotkeyCombo(s.windowHotkeyCombo || 'Alt+V');
+        if (!matchHotkey(e, combo)) return;
+        const t = e.target;
+        const tag = (t?.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return;
+        e.preventDefault();
+        if (panelEl) closePanel(); else openPanel();
+    });
+}
+
+/* ============================================================
+ *  自定义字体
+ * ============================================================ */
+
+function applyCustomFont() {
+    const s = loadSettings();
+    let style = document.getElementById('cv-custom-font-style');
+    if (!style) {
+        style = document.createElement('style');
+        style.id = 'cv-custom-font-style';
+        document.head.appendChild(style);
+    }
+    const fonts = Array.isArray(s.customFonts) ? s.customFonts : [];
+    // 消毒：去掉可能用来注入额外 CSS 规则的字符
+    const sanitize = (v) => String(v || '').replace(/['"\\;{}<>]/g, '').trim();
+    const sanitizeUrl = (v) => String(v || '').replace(/['"\\;<>]/g, '').trim();
+    const cleaned = fonts.map(f => ({
+        family: sanitize(f && f.family),
+        url:    sanitizeUrl(f && f.url),
+    })).filter(f => f.family || f.url);
+    if (cleaned.length === 0) { style.textContent = ''; return; }
+    // 关键：每条 URL 字体都用独立的内部固定名注册，避免污染酒馆全局命名
+    // 优先级：第 1 条 URL 字体 → 第 1 条 family → 第 2 条 URL → 第 2 条 family → ... → 系统兜底
+    // 浏览器逐字符回退，所以 [英文, 日文, 中文] 这种排列会自动按字符找第一个有该字形的字体
+    let css = '';
+    const stack = [];
+    cleaned.forEach((f, i) => {
+        const internal = `__cv_user_font_${i}__`;
+        if (f.url) {
+            css += `@font-face { font-family: '${internal}'; src: url('${f.url}'); font-display: swap; }\n`;
+            stack.push(`'${internal}'`);
+        }
+        if (f.family) stack.push(`'${f.family}'`);
+    });
+    stack.push('system-ui', '-apple-system', '"Segoe UI"', '"PingFang SC"',
+               '"Hiragino Sans GB"', '"Microsoft YaHei"', 'sans-serif');
+    // 只在面板根上覆盖 font-family，靠 CSS 继承生效；不动 monospace 等显式声明
+    css += `#chatvault_panel { font-family: ${stack.join(', ')}; }`;
+    style.textContent = css;
+}
+
+/* ============================================================
+ *  自定义配色（覆盖当前主题的 CSS 变量）
+ *  - 选择器用 #chatvault_panel（特异性 1,0,0），稳定胜过 .cv-theme-*（0,1,0）
+ *  - 每项独立可清除；未填的字段保持主题原值
+ *  - accent-muted / bgCard-hover 用 color-mix 自动派生，避免手动配错
+ * ============================================================ */
+const CV_COLOR_DEFAULTS = {
+    accent: '#34d399',
+    bgPanel: '#212327',
+    bgCard: '#2a2d32',
+    text: '#e4e5e7',
+    overlayAlpha: 0.55,
+};
+function applyCustomColors() {
+    const s = loadSettings();
+    let style = document.getElementById('cv-custom-colors-style');
+    if (!style) {
+        style = document.createElement('style');
+        style.id = 'cv-custom-colors-style';
+        document.head.appendChild(style);
+    }
+    // 仅当主题 = 自定义 时才注入覆盖；切回内置主题立刻清空，主题原色 100% 还原
+    if (s.theme !== 'custom') { style.textContent = ''; return; }
+    const c = s.customColors || {};
+    const isHex = (v) => /^#[0-9a-fA-F]{6}$/.test(String(v || '').trim());
+    const accent  = isHex(c.accent)  ? c.accent.trim()  : '';
+    const bgPanel = isHex(c.bgPanel) ? c.bgPanel.trim() : '';
+    const bgCard  = isHex(c.bgCard)  ? c.bgCard.trim()  : '';
+    const text    = isHex(c.text)    ? c.text.trim()    : '';
+    const overlayAlpha = (typeof c.overlayAlpha === 'number' && c.overlayAlpha >= 0 && c.overlayAlpha <= 1)
+        ? c.overlayAlpha : null;
+    const rules = [];
+    if (accent) {
+        rules.push(`--cv-accent: ${accent};`);
+        rules.push(`--cv-accent-muted: color-mix(in srgb, ${accent} 15%, transparent);`);
+    }
+    if (bgPanel) {
+        rules.push(`--cv-bg-panel: ${bgPanel};`);
+        // 派生边框 / 输入框背景，避免 light 自定义出现"黑边"或"暗色搜索框"
+        // 用文字色按 20%/8% 混入，自动适配深浅
+        rules.push(`--cv-border: color-mix(in srgb, ${bgPanel} 80%, var(--cv-text-primary, #888) 20%);`);
+        rules.push(`--cv-border-soft: color-mix(in srgb, ${bgPanel} 94%, var(--cv-text-primary, #888) 6%);`);
+        rules.push(`--cv-bg-input: color-mix(in srgb, ${bgPanel} 92%, var(--cv-text-primary, #888) 8%);`);
+    }
+    if (bgCard) {
+        rules.push(`--cv-bg-card: ${bgCard};`);
+        rules.push(`--cv-bg-card-hover: color-mix(in srgb, ${bgCard} 88%, var(--cv-text-primary, #888) 12%);`);
+    }
+    if (text) {
+        rules.push(`--cv-text-primary: ${text};`);
+        // 二级文字按主文字混 50% 派生，保持层次
+        rules.push(`--cv-text-secondary: color-mix(in srgb, ${text} 65%, transparent);`);
+        rules.push(`--cv-text-tertiary: color-mix(in srgb, ${text} 42%, transparent);`);
+    }
+    if (overlayAlpha !== null) rules.push(`--cv-bg-overlay: rgba(0,0,0,${overlayAlpha});`);
+    style.textContent = rules.length ? `#chatvault_panel { ${rules.join(' ')} }` : '';
+}
+
+/* ============================================================
  *  扩展设置面板（嵌入 ST「扩展」页）
  * ============================================================ */
 
@@ -2313,6 +2735,74 @@ function injectSettings() {
               ${THEMES.map(t => `<option value="${t.id}" ${s.theme === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
             </select>
           </div>
+          <hr style="border:none; border-top:1px solid var(--cv-border, rgba(127,127,127,0.25)); margin:10px 0;">
+
+          <!-- 字体设置（折叠） -->
+          <div class="inline-drawer cv-sub-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+              <b>字体设置（多字体优先级）</b>
+              <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content">
+              <div class="cv-settings-hint" style="margin-bottom:8px;">
+                💡 按上下顺序排优先级；浏览器会逐字符回退到第一个有该字形的字体。<br>
+                例如想英/日/中混排都好看：英文字体放第一，日文字体放第二，中文字体放第三。<br>
+                ⚠️ URL 字体由浏览器直接请求该地址，请确认来源可信；只在 ChatVault 内生效，不影响酒馆其它界面。
+              </div>
+              <div id="cv_font_list" class="cv-font-list"></div>
+              <div class="cv-settings-row">
+                <button id="cv_font_add" class="menu_button cv-inline-btn">＋ 添加一条字体</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 自定义配色（折叠；仅当配色方案 = 自定义 时显示） -->
+          <div id="cv_color_drawer_wrap" class="inline-drawer cv-sub-drawer" style="display:${s.theme === 'custom' ? 'block' : 'none'};">
+            <div class="inline-drawer-toggle inline-drawer-header">
+              <b>自定义配色面板</b>
+              <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content">
+              <div id="cv_color_grid" class="cv-color-grid"></div>
+              <div class="cv-settings-row" style="margin-top:8px;">
+                <button id="cv_color_reset_all" class="menu_button cv-inline-btn">⟲ 全部恢复基准</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- PC 端窗口设置（折叠，默认收起防止手机端误触） -->
+          <div class="inline-drawer cv-sub-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+              <b>PC 端窗口设置（手机端无效）</b>
+              <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content">
+              <div class="cv-settings-row">
+                <label class="checkbox_label" for="cv_set_window_free">
+                  <input type="checkbox" id="cv_set_window_free" ${s.windowFreeMode ? 'checked' : ''}>
+                  <span>桌面自由窗口模式（去掉背景遮罩，可同时操作酒馆）</span>
+                </label>
+              </div>
+              <div class="cv-settings-row">
+                <label class="checkbox_label" for="cv_set_hotkey">
+                  <input type="checkbox" id="cv_set_hotkey" ${s.windowHotkey ? 'checked' : ''}>
+                  <span>启用全局快捷键开关面板</span>
+                </label>
+              </div>
+              <div class="cv-settings-row">
+                <label for="cv_set_hotkey_combo">快捷键组合：</label>
+                <input type="text" id="cv_set_hotkey_combo" class="text_pole" value="${escapeHtml(s.windowHotkeyCombo || 'Alt+V')}" placeholder="例：Alt+V / Ctrl+Shift+K">
+              </div>
+              <div class="cv-settings-row">
+                <button id="cv_set_window_reset" class="menu_button cv-inline-btn">⟲ 复位窗口位置/缩放</button>
+              </div>
+              <div class="cv-settings-hint">
+                🖥️ 拖标题栏移动；右下角 ⌟ 角等比缩放（0.4×–3.0×，不会破坏内部排版）；状态自动记忆。<br>
+                ⚠️ 自定义快捷键时请避开酒馆/浏览器已用组合（如 Ctrl+S、F5）；在输入框焦点时快捷键不会触发。
+              </div>
+            </div>
+          </div>
+
           <div class="cv-settings-hint">
             v${VERSION} · 设置实时生效，主题切换会立即应用到已打开的面板。
           </div>
@@ -2328,12 +2818,229 @@ function injectSettings() {
     });
     wrap.querySelector('#cv_set_theme').addEventListener('change', (e) => {
         const cur = loadSettings();
-        saveSettings({ ...cur, theme: e.target.value });
+        const newTheme = e.target.value;
+        saveSettings({ ...cur, theme: newTheme });
         if (panelEl) panelEl.className = currentThemeClass();
+        applyCustomColors();
+        // 显隐自定义配色面板
+        const cdw = wrap.querySelector('#cv_color_drawer_wrap');
+        if (cdw) cdw.style.display = (newTheme === 'custom') ? 'block' : 'none';
+    });
+
+    // ----- 多字体管理 -----
+    const fontList = wrap.querySelector('#cv_font_list');
+    let _fontDebounce;
+    const renderFontList = () => {
+        const cur = loadSettings();
+        const fonts = Array.isArray(cur.customFonts) ? cur.customFonts : [];
+        if (fonts.length === 0) {
+            fontList.innerHTML = `<div class="cv-settings-hint" style="opacity:0.7;">还没有字体，点下方「添加」试试。留空就是用酒馆默认。</div>`;
+            return;
+        }
+        fontList.innerHTML = fonts.map((f, i) => `
+          <div class="cv-font-row" data-i="${i}">
+            <div class="cv-font-row-head">
+              <span class="cv-font-idx">${i + 1}</span>
+              <button class="cv-font-btn" data-act="up"   ${i === 0 ? 'disabled' : ''} title="上移">▲</button>
+              <button class="cv-font-btn" data-act="down" ${i === fonts.length - 1 ? 'disabled' : ''} title="下移">▼</button>
+              <button class="cv-font-btn cv-font-del" data-act="del" title="删除">×</button>
+            </div>
+            <input type="text" class="text_pole cv-font-input" data-field="family" placeholder="字体名（系统/酒馆已加载的；用作回退）" value="${escapeHtml(f.family || '')}">
+            <input type="text" class="text_pole cv-font-input" data-field="url"    placeholder="字体 URL（可选，以 https:// 开头的 .woff2/.ttf）" value="${escapeHtml(f.url || '')}">
+          </div>
+        `).join('');
+    };
+    const saveFontsDebounced = () => {
+        clearTimeout(_fontDebounce);
+        _fontDebounce = setTimeout(() => {
+            const cur = loadSettings();
+            const fonts = [...fontList.querySelectorAll('.cv-font-row')].map(row => ({
+                family: row.querySelector('[data-field="family"]').value.trim(),
+                url:    row.querySelector('[data-field="url"]').value.trim(),
+            }));
+            saveSettings({ ...cur, customFonts: fonts });
+            applyCustomFont();
+        }, 300);
+    };
+    fontList.addEventListener('input', (e) => {
+        if (e.target.matches('.cv-font-input')) saveFontsDebounced();
+    });
+    fontList.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-act]');
+        if (!btn) return;
+        e.preventDefault();
+        const row = btn.closest('.cv-font-row');
+        const i = Number(row.dataset.i);
+        const cur = loadSettings();
+        const fonts = [...(cur.customFonts || [])];
+        if (btn.dataset.act === 'up' && i > 0) {
+            [fonts[i - 1], fonts[i]] = [fonts[i], fonts[i - 1]];
+        } else if (btn.dataset.act === 'down' && i < fonts.length - 1) {
+            [fonts[i + 1], fonts[i]] = [fonts[i], fonts[i + 1]];
+        } else if (btn.dataset.act === 'del') {
+            fonts.splice(i, 1);
+        } else return;
+        saveSettings({ ...cur, customFonts: fonts });
+        applyCustomFont();
+        renderFontList();
+    });
+    wrap.querySelector('#cv_font_add').addEventListener('click', (e) => {
+        e.preventDefault();
+        const cur = loadSettings();
+        const fonts = [...(cur.customFonts || []), { family: '', url: '' }];
+        saveSettings({ ...cur, customFonts: fonts });
+        renderFontList();
+    });
+    renderFontList();
+
+    // ----- 自定义配色 -----
+    const colorGrid = wrap.querySelector('#cv_color_grid');
+    const COLOR_FIELDS = [
+        { key: 'accent',  label: '主色（按钮/强调）',  type: 'color' },
+        { key: 'bgPanel', label: '面板背景',           type: 'color' },
+        { key: 'bgCard',  label: '卡片背景',           type: 'color' },
+        { key: 'text',    label: '正文文字',           type: 'color' },
+        { key: 'overlayAlpha', label: '背景遮罩不透明度', type: 'range' },
+    ];
+    const renderColorGrid = () => {
+        const cur = loadSettings();
+        const cc = cur.customColors || {};
+        colorGrid.innerHTML = COLOR_FIELDS.map(f => {
+            const overriding = (f.key in cc) && cc[f.key] !== undefined && cc[f.key] !== '';
+            const dft = CV_COLOR_DEFAULTS[f.key];
+            if (f.type === 'color') {
+                const val = overriding ? cc[f.key] : dft;
+                return `
+                  <div class="cv-color-row ${overriding ? 'cv-cc-on' : ''}" data-cc-key="${f.key}">
+                    <span class="cv-cc-dot" title="${overriding ? '覆盖中' : '跟随主题'}"></span>
+                    <label>${f.label}</label>
+                    <input type="color" class="cv-cc-color" data-cc-input="${f.key}" value="${val}">
+                    <input type="text" class="cv-cc-hex" data-cc-hex="${f.key}" value="${val}" maxlength="7" spellcheck="false" placeholder="#rrggbb">
+                    <button class="cv-cc-clear" data-cc-clear="${f.key}" title="清除（跟随基准）" ${overriding ? '' : 'disabled'}>×</button>
+                  </div>
+                `;
+            } else {
+                const pct = overriding ? Math.round(cc[f.key] * 100) : Math.round(dft * 100);
+                return `
+                  <div class="cv-color-row ${overriding ? 'cv-cc-on' : ''}" data-cc-key="${f.key}">
+                    <span class="cv-cc-dot" title="${overriding ? '覆盖中' : '跟随主题'}"></span>
+                    <label>${f.label} <span class="cv-cc-pct" data-cc-pct="${f.key}">${pct}%</span></label>
+                    <input type="range" min="0" max="100" data-cc-input="${f.key}" value="${pct}">
+                    <button class="cv-cc-clear" data-cc-clear="${f.key}" title="清除（跟随基准）" ${overriding ? '' : 'disabled'}>×</button>
+                  </div>
+                `;
+            }
+        }).join('');
+    };
+    let _colorDebounce;
+    const saveColorDebounced = (key, raw) => {
+        clearTimeout(_colorDebounce);
+        _colorDebounce = setTimeout(() => {
+            const cur = loadSettings();
+            const cc = { ...(cur.customColors || {}) };
+            if (key === 'overlayAlpha') {
+                const n = Math.max(0, Math.min(100, Number(raw))) / 100;
+                cc[key] = n;
+            } else {
+                cc[key] = String(raw);
+            }
+            saveSettings({ ...cur, customColors: cc });
+            applyCustomColors();
+            // 局部刷新行状态而不是全量 re-render，避免打断滑块/取色器交互
+            const row = colorGrid.querySelector(`[data-cc-key="${key}"]`);
+            if (row) {
+                row.classList.add('cv-cc-on');
+                const clearBtn = row.querySelector('[data-cc-clear]');
+                if (clearBtn) clearBtn.disabled = false;
+                const dot = row.querySelector('.cv-cc-dot');
+                if (dot) dot.title = '覆盖中';
+            }
+        }, 150);
+    };
+    const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+    colorGrid.addEventListener('input', (e) => {
+        // 1) 取色器或 range
+        const inp = e.target.closest('[data-cc-input]');
+        if (inp) {
+            const key = inp.dataset.ccInput;
+            if (key === 'overlayAlpha') {
+                const pctEl = colorGrid.querySelector(`[data-cc-pct="${key}"]`);
+                if (pctEl) pctEl.textContent = `${inp.value}%`;
+            } else {
+                // 取色器变化时同步 hex 文本框
+                const hexEl = colorGrid.querySelector(`[data-cc-hex="${key}"]`);
+                if (hexEl) { hexEl.value = inp.value; hexEl.classList.remove('cv-cc-hex-bad'); }
+            }
+            saveColorDebounced(key, inp.value);
+            return;
+        }
+        // 2) hex 文本框
+        const hex = e.target.closest('[data-cc-hex]');
+        if (hex) {
+            let v = String(hex.value || '').trim();
+            // 自动补 # 前缀
+            if (v && v[0] !== '#') v = '#' + v;
+            const valid = HEX_RE.test(v);
+            hex.classList.toggle('cv-cc-hex-bad', !!v && !valid);
+            if (!valid) return;
+            hex.value = v.toLowerCase();
+            // 同步取色器
+            const key = hex.dataset.ccHex;
+            const colorEl = colorGrid.querySelector(`[data-cc-input="${key}"]`);
+            if (colorEl) colorEl.value = hex.value;
+            saveColorDebounced(key, hex.value);
+        }
+    });
+    colorGrid.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-cc-clear]');
+        if (!btn || btn.disabled) return;
+        e.preventDefault();
+        const key = btn.dataset.ccClear;
+        const cur = loadSettings();
+        const cc = { ...(cur.customColors || {}) };
+        delete cc[key];
+        saveSettings({ ...cur, customColors: cc });
+        applyCustomColors();
+        renderColorGrid();
+    });
+    wrap.querySelector('#cv_color_reset_all').addEventListener('click', (e) => {
+        e.preventDefault();
+        const cur = loadSettings();
+        saveSettings({ ...cur, customColors: {} });
+        applyCustomColors();
+        renderColorGrid();
+    });
+    renderColorGrid();
+
+    // 桌面窗口设置
+    wrap.querySelector('#cv_set_window_free').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        const on = !!e.target.checked;
+        saveSettings({ ...cur, windowFreeMode: on });
+        if (panelEl) panelEl.classList.toggle('cv-window-free', on);
+    });
+    wrap.querySelector('#cv_set_hotkey').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, windowHotkey: !!e.target.checked });
+    });
+    let _hkDebounce;
+    wrap.querySelector('#cv_set_hotkey_combo').addEventListener('input', (e) => {
+        clearTimeout(_hkDebounce);
+        _hkDebounce = setTimeout(() => {
+            const cur = loadSettings();
+            saveSettings({ ...cur, windowHotkeyCombo: (e.target.value || '').trim() || 'Alt+V' });
+        }, 300);
+    });
+    wrap.querySelector('#cv_set_window_reset').addEventListener('click', (e) => {
+        e.preventDefault();
+        resetWindow();
     });
 }
 
 jQuery(async () => {
+    applyCustomFont();
+    applyCustomColors();
+    setupHotkey();
     const tryInject = () => {
         if (document.getElementById('extensionsMenu')) applyEnabledState();
         if (document.getElementById('extensions_settings2')
