@@ -1169,7 +1169,7 @@
 }
 .cv-reader-msg-head {
     display: flex; align-items: center; gap: 8px;
-    margin-bottom: 8px; font-size: 12px;
+    margin-bottom: var(--cv-reader-head-gap, 14px); font-size: 12px;
 }
 .cv-reader-msg-avatar {
     width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
@@ -1181,10 +1181,10 @@
 .cv-reader-msg-floor { margin-left: auto; opacity: .5; font-size: 11px; font-variant-numeric: tabular-nums; }
 .cv-reader-msg-body {
     font-size: var(--cv-reader-font-size, 15px);
-    line-height: 1.85;
+    line-height: var(--cv-reader-line-height, 1.85);
     word-break: break-word; white-space: normal;
 }
-.cv-reader-msg-body .cv-msg-p { margin: 0 0 0.6em; }
+.cv-reader-msg-body .cv-msg-p { margin: 0 0 var(--cv-reader-para-gap, 0.6em); }
 .cv-reader-msg-body .cv-msg-p:last-child { margin-bottom: 0; }
 /* 段落首行缩进（仅当 stage[data-indent="1"]）；空段落不缩进 */
 .cv-reader-stage[data-indent="1"] .cv-reader-msg-body .cv-msg-p { text-indent: 2em; }
@@ -1408,8 +1408,7 @@
     .cv-reader-stage[data-reader-style="article"] .cv-reader-column { max-width: 100%; }
     .cv-reader-headinfo-meta { display: none; }
     .cv-reader-msg { padding: 10px 12px; }
-    .cv-reader-msg-body { line-height: 1.75; }
-    .cv-reader-stage[data-reader-style="article"] .cv-reader-msg-body { line-height: 1.9; }
+    .cv-reader-stage[data-reader-style="article"] .cv-reader-msg-body { line-height: calc(var(--cv-reader-line-height, 1.85) + 0.05); }
     .cv-reader-fab { width: 32px; height: 32px; top: 10px; }
     .cv-reader-fab-back { left: 10px; }
     .cv-reader-fab-gear { right: 10px; }
@@ -1871,4 +1870,238 @@
 .cv-strip-box .cv-field-hint {
     margin-top: -4px;
     margin-bottom: 12px;
+}
+
+
+/* ============================================================
+ * v0.4.2 阅读模式头部排版三方案 + 书签
+ * ============================================================ */
+
+/* —— 排版：居中 —— 三层式：头像 ↓ 名字 ↓ 楼层 —— */
+.cv-reader-stage[data-layout="center"] .cv-reader-msg-head {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: calc(4px * var(--cv-reader-head-scale, 1));
+    margin-bottom: calc(var(--cv-reader-head-gap, 14px) + 2px);
+}
+.cv-reader-stage[data-layout="center"] .cv-reader-msg-floor {
+    margin-left: 0;
+    margin-top: 2px;
+}
+/* 居中模式下名字单独一行更醒目 */
+.cv-reader-stage[data-layout="center"] .cv-reader-msg-who {
+    font-size: calc(13px * var(--cv-reader-head-scale, 1));
+}
+
+/* —— 排版：左右分（仅 head 翻转，正文照旧） —— */
+.cv-reader-stage[data-layout="dialog"] .cv-reader-msg.is-user .cv-reader-msg-head {
+    flex-direction: row-reverse;
+}
+.cv-reader-stage[data-layout="dialog"] .cv-reader-msg.is-user .cv-reader-msg-floor {
+    margin-left: 0;
+    margin-right: auto;
+}
+
+
+/* ============================================================
+ * v0.4.4 书签：菜单 / 设置列表 / 楼层 chip —— 全部走主题变量
+ * ============================================================ */
+
+/* —— 楼层号按钮 chip —— */
+.cv-reader-msg-floor {
+    background: transparent;
+    border: 1px solid transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    opacity: .5;
+    line-height: 1.4;
+    transition: background .15s, border-color .15s, opacity .15s, color .15s;
+    white-space: nowrap;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+.cv-reader-msg-floor:hover {
+    opacity: 1;
+    background: var(--cv-accent-muted);
+    color: var(--cv-accent);
+}
+.cv-reader-msg-floor svg { width: 11px; height: 11px; }
+.cv-reader-msg-floor .cv-floor-num { display: inline-block; }
+
+/* 已加书签的楼：填充 chip + 主色 */
+.cv-reader-msg-floor.is-bm {
+    opacity: 1;
+    background: var(--cv-accent-muted);
+    border-color: var(--cv-accent);
+    color: var(--cv-accent);
+    font-weight: 600;
+}
+.cv-reader-msg-floor.is-bm:hover {
+    background: var(--cv-accent);
+    color: var(--cv-bg-panel);
+}
+
+/* —— 弹出菜单（继承 cv-theme-* 变量） —— */
+.cv-msg-menu {
+    position: fixed;
+    z-index: 99999;
+    min-width: 168px;
+    background: var(--cv-bg-panel);
+    color: var(--cv-text-primary);
+    border: 1px solid var(--cv-border);
+    border-radius: var(--cv-radius-card, 8px);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+}
+.cv-msg-menu button {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    padding: 9px 12px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.cv-msg-menu button svg {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+    opacity: .75;
+}
+.cv-msg-menu button:hover {
+    background: var(--cv-accent-muted);
+    color: var(--cv-accent);
+}
+.cv-msg-menu button:hover svg { opacity: 1; }
+.cv-msg-menu button.cv-msg-menu-danger:hover {
+    background: var(--cv-danger-bg);
+    color: var(--cv-danger);
+}
+
+/* —— 设置面板「书签」分组 —— */
+.cv-bm-box .cv-bm-toggle {
+    cursor: pointer;
+    display: flex !important;
+    align-items: center;
+    justify-content: space-between;
+    user-select: none;
+    margin-bottom: 0;
+}
+.cv-bm-title-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+.cv-bm-title-label svg {
+    width: 14px; height: 14px;
+    color: var(--cv-accent);
+}
+.cv-bm-chev {
+    transition: transform .2s;
+    opacity: .5;
+    font-size: 14px;
+}
+.cv-bm-box[data-collapsed="0"] .cv-bm-chev { transform: rotate(180deg); }
+.cv-bm-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+/* 修复 [hidden] 默认 display:none 被 display:flex 覆盖导致折叠失效 */
+.cv-bm-body[hidden] { display: none !important; }
+.cv-bm-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--cv-bg-card);
+    border: 1px solid var(--cv-border-soft);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.cv-bm-item:hover { border-color: var(--cv-border); }
+.cv-bm-jump {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    padding: 8px 10px;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-family: inherit;
+}
+.cv-bm-jump:hover { background: var(--cv-accent-muted); color: var(--cv-accent); }
+.cv-bm-floor {
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    opacity: .65;
+    flex-shrink: 0;
+}
+.cv-bm-jump:hover .cv-bm-floor { opacity: 1; }
+.cv-bm-text {
+    flex: 1;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+.cv-bm-del {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    opacity: .4;
+    cursor: pointer;
+    padding: 8px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s, color .15s, opacity .15s;
+}
+.cv-bm-del:hover {
+    opacity: 1;
+    color: var(--cv-danger);
+    background: var(--cv-danger-bg);
+}
+.cv-bm-del svg { width: 14px; height: 14px; }
+
+
+/* v0.4.8 滑块小标题 + 紧凑行 */
+.cv-slider-label {
+    font-size: 12px;
+    color: var(--cv-text-secondary);
+    margin: 6px 0 2px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.cv-slider-label:first-child { margin-top: 0; }
+.cv-slider-label-sub {
+    font-size: 11px;
+    color: var(--cv-text-tertiary);
+    font-weight: normal;
+}
+.cv-slider-label + .cv-reader-fontsize-row {
+    padding: 0 0 4px;
+    margin-top: 0;
 }
