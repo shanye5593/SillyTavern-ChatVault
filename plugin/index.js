@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -2077,8 +2077,10 @@ async function importChatToCharacter(character, file) {
         fd.append('avatar_url', character.avatar);
         fd.append('file_type', 'jsonl');
         fd.append('user_name', userName);
-        fd.append('avatar', file, file.name);   // ST 历史上字段名是 'avatar'
-        fd.append('file', file, file.name);     // 兜底也带一个 'file'
+        fd.append('character_name', character.name || 'Character');
+        // ST 全局 multer 配置是 .single('avatar')，只允许这一个文件字段。
+        // 之前多塞一个 'file' 会触发 multer LIMIT_UNEXPECTED_FILE → 500
+        fd.append('avatar', file, file.name);
 
         const reqHeaders = headers();
         // multipart 不能手动设 Content-Type
