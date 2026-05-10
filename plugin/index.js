@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -1712,7 +1712,7 @@ function openMsgMenu(msgEl, x, y) {
             else if (act === 'del') {
                 removeBookmark(character.avatar, fileName, idx);
                 try { toastr.success(`已删除 #${idx} 书签`); } catch {}
-                renderReader();
+                refreshBookmarkUI(idx);
             }
         };
     });
@@ -1729,6 +1729,30 @@ function openMsgMenu(msgEl, x, y) {
         document.removeEventListener('mousedown', onDocDown, true);
         document.removeEventListener('touchstart', onDocDown, true);
     };
+}
+
+/* —— v0.5.2 增删书签后局部刷新，避免 renderReader 把阅读位置回顶 —— */
+function refreshBookmarkUI(idx) {
+    const ch = readerState.character, fn = readerState.fileName;
+    if (!ch || !fn) return;
+    const hit = !!findBookmark(ch.avatar, fn, idx);
+    // 1) 更新该楼层按钮
+    const msgEl = document.querySelector(`.cv-reader-msg[data-mes-idx="${idx}"]`);
+    if (msgEl) {
+        msgEl.classList.toggle('has-bookmark', hit);
+        const btn = msgEl.querySelector('.cv-reader-msg-floor');
+        if (btn) {
+            btn.classList.toggle('is-bm', hit);
+            btn.title = hit ? '已有书签 · 点击编辑 / 删除' : '点击添加书签';
+            btn.innerHTML = (hit ? ICONS.bookmark : '')
+                + `<span class="cv-floor-num">${hit ? '' : '#'}${idx}</span>`;
+        }
+    }
+    // 2) 设置面板若打开，刷新书签分组（数量、列表）
+    if (readerState.settingsOpen) {
+        const panel = document.getElementById('cv_reader_settings');
+        if (panel) renderReaderSettings(panel);
+    }
 }
 
 function openBookmarkModal(idx, existing) {
@@ -1772,7 +1796,7 @@ function openBookmarkModal(idx, existing) {
         if (!ok) return;
         closeModal();
         try { toastr.success(`已${existing ? '更新' : '添加'} #${idx} 书签`); } catch {}
-        renderReader();
+        refreshBookmarkUI(idx);
     };
     document.getElementById('cv_bm_save').onclick = save;
     wrap.querySelectorAll('input').forEach(inp => {
@@ -2249,7 +2273,7 @@ function renderReaderSettings(panel) {
         if (del) del.onclick = (e) => {
             e.stopPropagation();
             removeBookmark(rChar.avatar, rFile, idx);
-            renderReaderSettings(panel);
+            refreshBookmarkUI(idx); // 同步消息楼层按钮 + 重画书签列表
         };
     });
 
