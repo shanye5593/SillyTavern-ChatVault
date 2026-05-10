@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.4.1';
+const VERSION = '0.5.0';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -57,6 +57,14 @@ const DEFAULT_SETTINGS = {
     readerFontSize: 15,
     // 阅读模式段落首行缩进
     readerIndent: false,
+    // 阅读模式头部到正文间距 (px, 4-32)
+    readerHeadGap: 14,
+    // 阅读模式段落之间间距 (em, 0.2-1.5)
+    readerParaGap: 0.6,
+    // 阅读模式行间距 line-height (1.2-2.6, 默认 1.85)
+    readerLineHeight: 1.85,
+    // v0.4.2 阅读模式头部排版： 'default' | 'center' | 'dialog'
+    readerLayout: 'default',
     // 自定义字体（v0.3.31 起改成多字体优先级数组：[{family, url}, ...]）
     customFonts: [],
     // 自定义配色（v0.3.32 起；只覆盖填了的字段，其它跟随主题）
@@ -135,7 +143,8 @@ function patchMetaFor(avatar, fileName, patch) {
     if (m[k].customTitle === '') delete m[k].customTitle;
     if (Array.isArray(m[k].tags) && m[k].tags.length === 0) delete m[k].tags;
     if (m[k].userAvatar === '') delete m[k].userAvatar;
-    if (!m[k].starred && !m[k].customTitle && !m[k].tags && !m[k].userAvatar) {
+    if (Array.isArray(m[k].bookmarks) && m[k].bookmarks.length === 0) delete m[k].bookmarks;
+    if (!m[k].starred && !m[k].customTitle && !m[k].tags && !m[k].userAvatar && !m[k].bookmarks) {
         delete m[k];
     }
     saveMeta(m);
@@ -144,6 +153,49 @@ function patchMetaFor(avatar, fileName, patch) {
 function toggleStar(avatar, fileName) {
     const cur = getMetaFor(avatar, fileName);
     return patchMetaFor(avatar, fileName, { starred: !cur.starred }).starred || false;
+}
+
+/* —— v0.4.2 书签：每聊天独立，最多 50 条；指纹防错位 —— */
+const BOOKMARK_LIMIT = 50;
+function getBookmarks(avatar, fileName) {
+    const m = getMetaFor(avatar, fileName);
+    return Array.isArray(m.bookmarks) ? m.bookmarks.slice() : [];
+}
+function setBookmarks(avatar, fileName, list) {
+    const m = loadMeta();
+    const k = metaKey(avatar, fileName);
+    m[k] = m[k] || {};
+    if (Array.isArray(list) && list.length) m[k].bookmarks = list;
+    else delete m[k].bookmarks;
+    if (!m[k].starred && !m[k].customTitle && !m[k].tags && !m[k].userAvatar && !m[k].bookmarks) delete m[k];
+    saveMeta(m);
+}
+function bmFingerprint(text) {
+    return String(text || '').replace(/\s+/g, '').slice(0, 30);
+}
+function bmSnippet(rawMes) {
+    const t = String(rawMes || '').replace(/\s+/g, ' ').trim();
+    return t.slice(0, 30);
+}
+function findBookmark(avatar, fileName, idx) {
+    return getBookmarks(avatar, fileName).find(b => b.idx === idx) || null;
+}
+function upsertBookmark(avatar, fileName, idx, snippet, note) {
+    const list = getBookmarks(avatar, fileName);
+    const exist = list.findIndex(b => b.idx === idx);
+    if (exist < 0 && list.length >= BOOKMARK_LIMIT) {
+        try { toastr.warning(`书签上限 ${BOOKMARK_LIMIT} 条，请先删几个`); } catch {}
+        return false;
+    }
+    const item = { idx, snippet: snippet || '', note: note || '', createdAt: Date.now() };
+    if (exist >= 0) list[exist] = { ...list[exist], snippet: item.snippet, note: item.note };
+    else list.push(item);
+    list.sort((a, b) => a.idx - b.idx);
+    setBookmarks(avatar, fileName, list);
+    return true;
+}
+function removeBookmark(avatar, fileName, idx) {
+    setBookmarks(avatar, fileName, getBookmarks(avatar, fileName).filter(b => b.idx !== idx));
 }
 
 /* ============================================================
@@ -258,11 +310,46 @@ async function deleteChat(avatar, fileName) {
 
 /* ---- 最后一条消息预览：懒加载 ---- */
 
-const previewCache = new Map(); // key = metaKey, value = string | null
+// value:
+//   string         → 正文首句
+//   ''             → 空聊天
+//   null           → 失败但仍在冷却期（10 分钟内不重试）
+// 内部表示：失败用 { __cvFail: ts } 对象记时间戳，到期后 has() 视为未命中
+const previewCache = new Map();
+const PREVIEW_CACHE_MAX = 500;        // 软上限，超出按插入序裁掉最早 10%
+const PREVIEW_FAIL_TTL  = 10 * 60_000; // 失败 10 分钟后允许重试
+
+function previewCacheGet(key) {
+    if (!previewCache.has(key)) return { hit: false };
+    const v = previewCache.get(key);
+    if (v && typeof v === 'object' && '__cvFail' in v) {
+        if (Date.now() - v.__cvFail < PREVIEW_FAIL_TTL) return { hit: true, value: null };
+        previewCache.delete(key); // 失败已过期，让调用方重新拉
+        return { hit: false };
+    }
+    return { hit: true, value: v };
+}
+function previewCacheSet(key, value) {
+    // 软上限：Map 迭代序 = 插入序，超出就裁掉最早一批，避免逐次 delete 抖动
+    if (previewCache.size >= PREVIEW_CACHE_MAX && !previewCache.has(key)) {
+        const drop = Math.ceil(PREVIEW_CACHE_MAX / 10);
+        const it = previewCache.keys();
+        for (let i = 0; i < drop; i++) {
+            const k = it.next().value;
+            if (k === undefined) break;
+            previewCache.delete(k);
+        }
+    }
+    previewCache.set(key, value);
+}
+function previewCacheMarkFail(key) {
+    previewCacheSet(key, { __cvFail: Date.now() });
+}
 
 async function fetchLastMessageText(character, fileName) {
     const key = metaKey(character.avatar, fileName);
-    if (previewCache.has(key)) return previewCache.get(key);
+    const cached = previewCacheGet(key);
+    if (cached.hit) return cached.value;
 
     // 尝试多种 body 形态以兼容不同 ST 版本（带 force:true 跳过缓存）
     const bodies = [
@@ -284,15 +371,15 @@ async function fetchLastMessageText(character, fileName) {
             for (let i = arr.length - 1; i >= 0; i--) {
                 const msg = arr[i];
                 if (msg && typeof msg.mes === 'string' && msg.mes.trim()) {
-                    previewCache.set(key, msg.mes);
+                    previewCacheSet(key, msg.mes);
                     return msg.mes;
                 }
             }
-            previewCache.set(key, '');
+            previewCacheSet(key, '');
             return '';
         } catch { /* try next body shape */ }
     }
-    previewCache.set(key, null); // 永久失败
+    previewCacheMarkFail(key); // 软失败：10 分钟后允许重试
     return null;
 }
 
@@ -494,7 +581,9 @@ const ICONS = {
     chevDown: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>`,
     book: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`,
     arrowL: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>`,
-    gear: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9 1.65 1.65 0 0 0 4.27 7.18l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.34.22.7.22 1.06V11a2 2 0 0 1 0 4z"/></svg>`,
+    bookmark: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`,
+    bookmarkPlus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><line x1="12" y1="7" x2="12" y2="13"/><line x1="9" y1="10" x2="15" y2="10"/></svg>`,
+        gear: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9 1.65 1.65 0 0 0 4.27 7.18l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.34.22.7.22 1.06V11a2 2 0 0 1 0 4z"/></svg>`,
     refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>`,
 };
 
@@ -640,6 +729,8 @@ function setStatus(text) {
 
 async function loadAll() {
     const loadToken = ++loadAllToken; // 防止重复打开造成的并发污染
+    // 主刷新时同时让预览缓存重新生成，避免「酒馆里改完档回来还看到旧首句」
+    previewCache.clear();
     setStatus('正在初始化…');
     document.getElementById('cv_body').innerHTML = '<div class="cv-loading">正在加载…</div>';
     try {
@@ -1139,8 +1230,9 @@ function observePreviews() {
         const card = el.closest('.cv-card');
         if (!card) return;
         const key = metaKey(card.dataset.avatar, card.dataset.file);
-        if (previewCache.has(key)) {
-            const text = previewCache.get(key);
+        const cached = previewCacheGet(key);
+        if (cached.hit) {
+            const text = cached.value;
             if (text === null) {
                 el.classList.remove('is-loading'); el.classList.add('is-empty');
                 el.textContent = '（无法加载预览）';
@@ -1311,6 +1403,9 @@ function readerCfg() {
     const u = { ...DEFAULT_USER_RULES, ...(cfg.userRules || {}) };
     const fs = Number(cfg.readerFontSize);
     const hs = Number(cfg.readerHeadScale);
+    const hg = Number(cfg.readerHeadGap);
+    const pg = Number(cfg.readerParaGap);
+    const lh = Number(cfg.readerLineHeight);
     return {
         strip:   { ...DEFAULT_STRIP,   ...(cfg.strip   || {}) },
         extract: { ...DEFAULT_EXTRACT, ...(cfg.extract || {}) },
@@ -1322,7 +1417,11 @@ function readerCfg() {
         pagerMode: cfg.readerPagerMode === 'always' ? 'always' : 'autoHide',
         fontSize: (Number.isFinite(fs) && fs >= 12 && fs <= 28) ? fs : 15,
         headScale: (Number.isFinite(hs) && hs >= 0.8 && hs <= 1.8) ? hs : 1.0,
+        headGap:   (Number.isFinite(hg) && hg >= 4 && hg <= 32) ? hg : 14,
+        paraGap:   (Number.isFinite(pg) && pg >= 0.2 && pg <= 1.5) ? pg : 0.6,
+        lineHeight:(Number.isFinite(lh) && lh >= 1.2 && lh <= 2.6) ? lh : 1.85,
         indent: !!cfg.readerIndent,
+        layout: ['default','center','dialog'].includes(cfg.readerLayout) ? cfg.readerLayout : 'default',
     };
 }
 
@@ -1337,8 +1436,8 @@ function renderReader() {
 
     // 悬浮覆层（按钮 + 设置面板 + 分页器都从 stage 移出，作为 cv_body 的直接子节点）
     // 这样它们才真正"悬浮"——不会随 stage 滚动消失
-    const stageStyle = `--cv-reader-font-size:${cfgPre.fontSize}px;--cv-reader-head-scale:${cfgPre.headScale}`;
-    const stageOpen = `<div class="cv-reader-stage" data-pager-mode="${cfgPre.pagerMode}" data-indent="${cfgPre.indent ? '1' : '0'}" style="${stageStyle}"><div class="cv-reader-column">`;
+    const stageStyle = `--cv-reader-font-size:${cfgPre.fontSize}px;--cv-reader-head-scale:${cfgPre.headScale};--cv-reader-head-gap:${cfgPre.headGap}px;--cv-reader-para-gap:${cfgPre.paraGap}em;--cv-reader-line-height:${cfgPre.lineHeight}`;
+    const stageOpen = `<div class="cv-reader-stage" data-pager-mode="${cfgPre.pagerMode}" data-indent="${cfgPre.indent ? '1' : '0'}" data-layout="${cfgPre.layout}" style="${stageStyle}"><div class="cv-reader-column">`;
     const stageClose = `</div></div>`;
     const overlayHtml = `
         <button class="cv-reader-fab cv-reader-fab-back" id="cv_reader_back" type="button" title="返回列表">${ICONS.arrowL}</button>
@@ -1427,12 +1526,15 @@ function renderReader() {
             : (avatarUrl
                 ? `<img class="cv-reader-msg-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt=""/>`
                 : `<div class="cv-reader-msg-avatar">${escapeHtml((m.who||'C').slice(0,1))}</div>`);
+        const _bmHit = (readerState.character && readerState.fileName)
+            ? !!findBookmark(readerState.character.avatar, readerState.fileName, m.idx) : false;
+        const _floorTitle = _bmHit ? '已有书签 · 点击编辑 / 删除' : '点击添加书签';
         return `
-            <div class="cv-reader-msg ${m.is_user ? 'is-user' : 'is-char'}">
+            <div class="cv-reader-msg ${m.is_user ? 'is-user' : 'is-char'}${_bmHit ? ' has-bookmark' : ''}" data-mes-idx="${m.idx}">
                 <div class="cv-reader-msg-head">
                     ${avHtml}
                     <span class="cv-reader-msg-who">${who}</span>
-                    <span class="cv-reader-msg-floor">#${m.idx}</span>
+                    <button type="button" class="cv-reader-msg-floor${_bmHit ? ' is-bm' : ''}" data-mes-idx="${m.idx}" title="${_floorTitle}">${_bmHit ? ICONS.bookmark : ''}<span class="cv-floor-num">${_bmHit ? '' : '#'}${m.idx}</span></button>
                 </div>
                 <div class="cv-reader-msg-body">${text}</div>
             </div>
@@ -1449,6 +1551,7 @@ function renderReader() {
         + (pagerHtml ? `<div class="cv-reader-pager-wrap" data-pager-mode="${cfgPre.pagerMode}">${pagerHtml}</div>` : '');
     bindReaderHeader();
     bindReaderPager(totalPages);
+    bindReaderMsgMenu();
     if (readerState.settingsOpen) {
         const panel = document.getElementById('cv_reader_settings');
         if (panel) { panel.hidden = false; renderReaderSettings(panel); }
@@ -1549,6 +1652,170 @@ function bindReaderPager(totalPages) {
     const goBtn = document.getElementById('cv_pager_go');
     if (goBtn) goBtn.onclick = () => goTo(inp?.value);
     if (inp) inp.onkeydown = (e) => { if (e.key === 'Enter') goTo(inp.value); };
+}
+
+/* —— v0.4.4 书签入口：唯一入口 = 点击楼层号；不再监听任何长按 / 右键 —— */
+function bindReaderMsgMenu() {
+    const list = document.querySelector('.cv-reader-list');
+    if (!list) return;
+    list.querySelectorAll('.cv-reader-msg-floor').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            const msg = btn.closest('.cv-reader-msg');
+            if (!msg) return;
+            const rect = btn.getBoundingClientRect();
+            openMsgMenu(msg, rect.left, rect.bottom + 4);
+        };
+    });
+}
+
+function closeMsgMenu() {
+    const m = document.getElementById('cv_msg_menu');
+    if (m) {
+        try { m._cleanup && m._cleanup(); } catch {}
+        m.remove();
+    }
+}
+
+function openMsgMenu(msgEl, x, y) {
+    closeMsgMenu();
+    const idx = Number(msgEl.dataset.mesIdx);
+    const { character, fileName } = readerState;
+    if (!character || !fileName || !Number.isFinite(idx)) return;
+    const exist = findBookmark(character.avatar, fileName, idx);
+    const menu = document.createElement('div');
+    menu.className = 'cv-msg-menu';
+    menu.id = 'cv_msg_menu';
+    menu.innerHTML = exist
+        ? `<button data-act="edit" type="button">${ICONS.edit}<span>编辑书签</span></button><button data-act="del" type="button" class="cv-msg-menu-danger">${ICONS.trash}<span>删除书签</span></button>`
+        : `<button data-act="add" type="button">${ICONS.bookmarkPlus}<span>添加书签到 #${idx}</span></button>`;
+    // 挂在 chatvault_panel 内部，才能继承 .cv-theme-* 配色变量；落到 body 会变黑块
+    (document.getElementById('chatvault_panel') || document.body).appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left = x, top = y;
+    if (left + rect.width > vw - 8) left = Math.max(8, vw - rect.width - 8);
+    // 优先放在下方；下方放不下且上方更宽敞时放上方
+    if (top + rect.height > vh - 8) {
+        const above = y - rect.height - 8;
+        if (above >= 8) top = above;
+        else top = Math.max(8, vh - rect.height - 8);
+    }
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+    menu.querySelectorAll('button').forEach(b => {
+        b.onclick = (e) => {
+            e.stopPropagation();
+            const act = b.dataset.act;
+            closeMsgMenu();
+            if (act === 'add' || act === 'edit') openBookmarkModal(idx, exist);
+            else if (act === 'del') {
+                removeBookmark(character.avatar, fileName, idx);
+                try { toastr.success(`已删除 #${idx} 书签`); } catch {}
+                renderReader();
+            }
+        };
+    });
+    // dismiss：只在点击菜单外部时关，避免点击菜单内部按钮被吞
+    const onDocDown = (ev) => {
+        if (menu.contains(ev.target)) return;
+        closeMsgMenu();
+    };
+    setTimeout(() => {
+        document.addEventListener('mousedown', onDocDown, true);
+        document.addEventListener('touchstart', onDocDown, true);
+    }, 0);
+    menu._cleanup = () => {
+        document.removeEventListener('mousedown', onDocDown, true);
+        document.removeEventListener('touchstart', onDocDown, true);
+    };
+}
+
+function openBookmarkModal(idx, existing) {
+    const { character, fileName, arr } = readerState;
+    if (!character || !arr) return;
+    const messages = arr.slice(1);
+    const m = messages[idx];
+    if (!m) return;
+    const rawMes = (typeof m.mes === 'string') ? m.mes : '';
+    const snippet = bmSnippet(rawMes);
+    const note = existing?.note || '';
+    closeModal();
+    const wrap = document.createElement('div');
+    wrap.className = 'cv-modal-backdrop';
+    wrap.id = 'cv_modal';
+    wrap.innerHTML = `
+        <div class="cv-modal" onclick="event.stopPropagation()">
+            <button class="cv-modal-close" id="cv_bm_close" type="button" title="关闭">${ICONS.close}</button>
+            <h3>${existing ? '编辑书签' : '添加书签'} · #${idx}</h3>
+            <div class="cv-modal-body">
+                <div class="cv-field">
+                    <label>备注（可选，最多 40 字）</label>
+                    <input type="text" id="cv_bm_note" maxlength="40" placeholder="例如：两人第一次牵手" value="${escapeHtml(note)}"/>
+                    <div class="cv-field-hint">${existing ? `楼层 #${idx}` : `将为楼层 #${idx} 添加书签`}</div>
+                </div>
+            </div>
+            <div class="cv-modal-actions">
+                <button class="cv-btn" id="cv_bm_cancel" type="button">取消</button>
+                <button class="cv-btn cv-btn-primary" id="cv_bm_save" type="button">${existing ? '保存修改' : '加入书签'}</button>
+            </div>
+        </div>
+    `;
+    wrap.onclick = closeModal;
+    document.getElementById('chatvault_panel').appendChild(wrap);
+    setTimeout(() => { const i = document.getElementById('cv_bm_note'); if (i) { i.focus(); i.select(); } }, 0);
+    document.getElementById('cv_bm_close').onclick = closeModal;
+    document.getElementById('cv_bm_cancel').onclick = closeModal;
+    const save = () => {
+        const noteVal = (document.getElementById('cv_bm_note')?.value || '').trim();
+        const ok = upsertBookmark(character.avatar, fileName, idx, snippet, noteVal);
+        if (!ok) return;
+        closeModal();
+        try { toastr.success(`已${existing ? '更新' : '添加'} #${idx} 书签`); } catch {}
+        renderReader();
+    };
+    document.getElementById('cv_bm_save').onclick = save;
+    wrap.querySelectorAll('input').forEach(inp => {
+        inp.onkeydown = (e) => {
+            if (e.key === 'Enter') save();
+            else if (e.key === 'Escape') closeModal();
+        };
+    });
+}
+
+function jumpToBookmark(b) {
+    if (!b) return;
+    const arr = readerState.arr;
+    if (!arr) return;
+    const messages = arr.slice(1);
+    if (!messages.length) return;
+    const want = bmFingerprint(b.snippet);
+    const fpAt = (i) => {
+        const m = messages[i];
+        if (!m || typeof m.mes !== 'string') return false;
+        if (!want) return true;
+        return bmFingerprint(m.mes) === want;
+    };
+    let found = -1;
+    if (b.idx >= 0 && b.idx < messages.length && fpAt(b.idx)) found = b.idx;
+    if (found < 0) {
+        for (let d = 1; d <= 30; d++) {
+            if (b.idx - d >= 0 && fpAt(b.idx - d)) { found = b.idx - d; break; }
+            if (b.idx + d < messages.length && fpAt(b.idx + d)) { found = b.idx + d; break; }
+        }
+    }
+    if (found < 0) found = Math.min(messages.length - 1, Math.max(0, b.idx));
+    const targetPage = Math.max(1, Math.ceil((found + 1) / READER_PAGE_SIZE));
+    readerState.page = targetPage;
+    readerState.settingsOpen = false;
+    renderReader();
+    requestAnimationFrame(() => {
+        const stage = document.querySelector('.cv-reader-stage');
+        const target = document.querySelector(`.cv-reader-msg[data-mes-idx="${found}"]`);
+        if (stage && target) {
+            stage.scrollTop = Math.max(0, target.offsetTop - 16);
+        }
+    });
 }
 
 /* ============================================================
@@ -1785,15 +2052,25 @@ function renderReaderSettings(panel) {
             <button class="cv-reader-settings-close" id="cv_r_close" type="button" title="关闭">×</button>
         </div>
         <div class="cv-reader-settings-body">
-            <div class="cv-strip-box">
-                <div class="cv-strip-title">配色方案</div>
-                <div class="cv-reader-style-row">
-                    ${THEMES.map(t => `
-                        <label class="cv-reader-style-opt ${curTheme===t.id?'is-on':''}">
-                            <input type="radio" name="cv_r_theme" value="${t.id}" ${curTheme===t.id?'checked':''}/>
-                            <span class="cv-reader-style-name">${escapeHtml(t.name)}</span>
-                        </label>
-                    `).join('')}
+            <div class="cv-strip-box cv-bm-box" data-collapsed="${ (rChar.avatar && rFile && getBookmarks(rChar.avatar, rFile).length) ? '0' : '1' }">
+                <div class="cv-strip-title cv-bm-toggle" id="cv_r_bm_toggle">
+                    <span class="cv-bm-title-label">${ICONS.bookmark}<span>书签 (${ (rChar.avatar && rFile) ? getBookmarks(rChar.avatar, rFile).length : 0 })</span></span>
+                    <span class="cv-bm-chev">▾</span>
+                </div>
+                <div class="cv-bm-body" id="cv_r_bm_body" ${ (rChar.avatar && rFile && getBookmarks(rChar.avatar, rFile).length) ? '' : 'hidden' }>
+                    ${ (() => {
+                        const _list = (rChar.avatar && rFile) ? getBookmarks(rChar.avatar, rFile) : [];
+                        if (!_list.length) return '<div class="cv-field-hint">还没有书签。阅读时点击消息右上角的楼层号 <code>#N</code> 即可添加。</div>';
+                        return _list.map(b => `
+                            <div class="cv-bm-item" data-idx="${b.idx}">
+                                <button class="cv-bm-jump" type="button" title="跳转到 #${b.idx}">
+                                    <span class="cv-bm-floor">#${b.idx}</span>
+                                    <span class="cv-bm-text">${escapeHtml(b.note || `楼层 ${b.idx}`)}</span>
+                                </button>
+                                <button class="cv-bm-del" type="button" title="删除">${ICONS.trash}</button>
+                            </div>
+                        `).join('');
+                    })() }
                 </div>
             </div>
             <div class="cv-strip-box">
@@ -1813,10 +2090,47 @@ function renderReaderSettings(panel) {
                 </div>
             </div>
             <div class="cv-strip-box">
-                <div class="cv-strip-title">正文字号</div>
+                <div class="cv-strip-title">头部排版</div>
+                <div class="cv-field-hint">头像 / 名字 / 楼层号的对齐方式（不影响正文）。</div>
+                <div class="cv-reader-style-row">
+                    <label class="cv-reader-style-opt ${ (cfg.readerLayout||'default')==='default'?'is-on':'' }">
+                        <input type="radio" name="cv_r_layout" value="default" ${ (cfg.readerLayout||'default')==='default'?'checked':'' }/>
+                        <span class="cv-reader-style-name">默认</span>
+                        <span class="cv-reader-style-desc">头像左 · 楼层右</span>
+                    </label>
+                    <label class="cv-reader-style-opt ${ cfg.readerLayout==='center'?'is-on':'' }">
+                        <input type="radio" name="cv_r_layout" value="center" ${ cfg.readerLayout==='center'?'checked':'' }/>
+                        <span class="cv-reader-style-name">居中</span>
+                        <span class="cv-reader-style-desc">头像 / 名字 / 楼层全居中</span>
+                    </label>
+                    <label class="cv-reader-style-opt ${ cfg.readerLayout==='dialog'?'is-on':'' }">
+                        <input type="radio" name="cv_r_layout" value="dialog" ${ cfg.readerLayout==='dialog'?'checked':'' }/>
+                        <span class="cv-reader-style-name">左右分</span>
+                        <span class="cv-reader-style-desc">AI 在左 · 你在右</span>
+                    </label>
+                </div>
+            </div>
+            <div class="cv-strip-box">
+                <div class="cv-strip-title">正文字号 / 段落 / 头部间距</div>
+                <div class="cv-slider-label">字号</div>
                 <div class="cv-reader-fontsize-row">
                     <input type="range" id="cv_r_fontsize" min="13" max="28" step="0.5" value="${cfg.readerFontSize || 15}"/>
                     <span class="cv-reader-fontsize-val" id="cv_r_fontsize_val">${cfg.readerFontSize || 15}px</span>
+                </div>
+                <div class="cv-slider-label">段落之间间距 <span class="cv-slider-label-sub">行与行之间的呼吸</span></div>
+                <div class="cv-reader-fontsize-row">
+                    <input type="range" id="cv_r_paragap" min="0.2" max="1.5" step="0.05" value="${(Number(cfg.readerParaGap) || 0.6).toFixed(2)}"/>
+                    <span class="cv-reader-fontsize-val" id="cv_r_paragap_val">${(Number(cfg.readerParaGap) || 0.6).toFixed(2)}em</span>
+                </div>
+                <div class="cv-slider-label">行间距 <span class="cv-slider-label-sub">同段内上下行的距离</span></div>
+                <div class="cv-reader-fontsize-row">
+                    <input type="range" id="cv_r_lineheight" min="1.2" max="2.6" step="0.05" value="${(Number(cfg.readerLineHeight) || 1.85).toFixed(2)}"/>
+                    <span class="cv-reader-fontsize-val" id="cv_r_lineheight_val">${(Number(cfg.readerLineHeight) || 1.85).toFixed(2)}</span>
+                </div>
+                <div class="cv-slider-label">头部到正文间距 <span class="cv-slider-label-sub">角色名下方留白</span></div>
+                <div class="cv-reader-fontsize-row">
+                    <input type="range" id="cv_r_headgap" min="4" max="32" step="1" value="${Number(cfg.readerHeadGap) || 14}"/>
+                    <span class="cv-reader-fontsize-val" id="cv_r_headgap_val">${Number(cfg.readerHeadGap) || 14}px</span>
                 </div>
                 ${sw('cv_r_indent', !!cfg.readerIndent, '段落首行缩进 2 字')}
             </div>
@@ -1825,6 +2139,17 @@ function renderReaderSettings(panel) {
                 <div class="cv-reader-fontsize-row">
                     <input type="range" id="cv_r_headscale" min="0.8" max="1.8" step="0.05" value="${(Number(cfg.readerHeadScale) || 1).toFixed(2)}"/>
                     <span class="cv-reader-fontsize-val" id="cv_r_headscale_val">${Math.round((Number(cfg.readerHeadScale) || 1) * 100)}%</span>
+                </div>
+            </div>
+            <div class="cv-strip-box">
+                <div class="cv-strip-title">配色方案</div>
+                <div class="cv-reader-style-row">
+                    ${THEMES.map(t => `
+                        <label class="cv-reader-style-opt ${curTheme===t.id?'is-on':''}">
+                            <input type="radio" name="cv_r_theme" value="${t.id}" ${curTheme===t.id?'checked':''}/>
+                            <span class="cv-reader-style-name">${escapeHtml(t.name)}</span>
+                        </label>
+                    `).join('')}
                 </div>
             </div>
             <div class="cv-strip-box">
@@ -1860,7 +2185,7 @@ function renderReaderSettings(panel) {
                     <div class="cv-field-hint" style="margin-top:6px">当前已绑定：${boundUA ? `<code>${escapeHtml(boundUA)}</code>` : '（无）'}</div>
                 `}
             </div>
-            <div class="cv-reader-settings-hint">摘取规则已搬到主面板每张卡片折叠区的「摘取规则」按钮，阅读 / 导出共用一套</div>
+                        <div class="cv-reader-settings-hint">摘取规则已搬到主面板每张卡片折叠区的「摘取规则」按钮，阅读 / 导出共用一套</div>
         </div>
     `;
 
@@ -1885,6 +2210,42 @@ function renderReaderSettings(panel) {
         };
     });
 
+    panel.querySelectorAll('input[name="cv_r_layout"]').forEach(r => {
+        r.onchange = () => {
+            if (!r.checked) return;
+            const c = loadSettings();
+            saveSettings({ ...c, readerLayout: r.value });
+            const stage = document.querySelector('.cv-reader-stage');
+            if (stage) stage.dataset.layout = r.value;
+            panel.querySelectorAll('input[name="cv_r_layout"]').forEach(x => {
+                x.closest('.cv-reader-style-opt')?.classList.toggle('is-on', x.checked);
+            });
+        };
+    });
+
+    /* 书签分组：折叠 / 跳转 / 删除 */
+    const bmToggle = document.getElementById('cv_r_bm_toggle');
+    const bmBody = document.getElementById('cv_r_bm_body');
+    if (bmToggle && bmBody) bmToggle.onclick = () => {
+        bmBody.hidden = !bmBody.hidden;
+        bmToggle.parentElement.dataset.collapsed = bmBody.hidden ? '1' : '0';
+    };
+    panel.querySelectorAll('.cv-bm-item').forEach(item => {
+        const idx = Number(item.dataset.idx);
+        const jump = item.querySelector('.cv-bm-jump');
+        const del  = item.querySelector('.cv-bm-del');
+        if (jump) jump.onclick = (e) => {
+            e.stopPropagation();
+            const b = (rChar.avatar && rFile) ? findBookmark(rChar.avatar, rFile, idx) : null;
+            if (b) jumpToBookmark(b);
+        };
+        if (del) del.onclick = (e) => {
+            e.stopPropagation();
+            removeBookmark(rChar.avatar, rFile, idx);
+            renderReaderSettings(panel);
+        };
+    });
+
     // 字号滑块（实时调整 stage 上的 CSS 变量，无需重排）
     const fsInput = document.getElementById('cv_r_fontsize');
     const fsVal   = document.getElementById('cv_r_fontsize_val');
@@ -1901,6 +2262,57 @@ function renderReaderSettings(panel) {
         };
         fsInput.oninput  = () => apply(false);
         fsInput.onchange = () => apply(true);
+    }
+    // 段落间距滑块（em）
+    const pgInput = document.getElementById('cv_r_paragap');
+    const pgVal   = document.getElementById('cv_r_paragap_val');
+    if (pgInput) {
+        const apply = (save) => {
+            const v = Math.max(0.2, Math.min(1.5, Number(pgInput.value) || 0.6));
+            if (pgVal) pgVal.textContent = v.toFixed(2) + 'em';
+            const stage = document.querySelector('.cv-reader-stage');
+            if (stage) stage.style.setProperty('--cv-reader-para-gap', v + 'em');
+            if (save) {
+                const c = loadSettings();
+                saveSettings({ ...c, readerParaGap: v });
+            }
+        };
+        pgInput.oninput  = () => apply(false);
+        pgInput.onchange = () => apply(true);
+    }
+    // 行间距滑块（unitless line-height）
+    const lhInput = document.getElementById('cv_r_lineheight');
+    const lhVal   = document.getElementById('cv_r_lineheight_val');
+    if (lhInput) {
+        const apply = (save) => {
+            const v = Math.max(1.2, Math.min(2.6, Number(lhInput.value) || 1.85));
+            if (lhVal) lhVal.textContent = v.toFixed(2);
+            const stage = document.querySelector('.cv-reader-stage');
+            if (stage) stage.style.setProperty('--cv-reader-line-height', String(v));
+            if (save) {
+                const c = loadSettings();
+                saveSettings({ ...c, readerLineHeight: v });
+            }
+        };
+        lhInput.oninput  = () => apply(false);
+        lhInput.onchange = () => apply(true);
+    }
+    // 头部到正文间距滑块（px）
+    const hgInput = document.getElementById('cv_r_headgap');
+    const hgVal   = document.getElementById('cv_r_headgap_val');
+    if (hgInput) {
+        const apply = (save) => {
+            const v = Math.max(4, Math.min(32, Math.round(Number(hgInput.value) || 14)));
+            if (hgVal) hgVal.textContent = v + 'px';
+            const stage = document.querySelector('.cv-reader-stage');
+            if (stage) stage.style.setProperty('--cv-reader-head-gap', v + 'px');
+            if (save) {
+                const c = loadSettings();
+                saveSettings({ ...c, readerHeadGap: v });
+            }
+        };
+        hgInput.oninput  = () => apply(false);
+        hgInput.onchange = () => apply(true);
     }
     // 卡片头部缩放滑块
     const hsInput = document.getElementById('cv_r_headscale');
@@ -2190,7 +2602,7 @@ function openEditModal(character, fileName) {
                 }
                 // 预览缓存也迁移
                 if (previewCache.has(oldKey)) {
-                    previewCache.set(newKey, previewCache.get(oldKey));
+                    previewCacheSet(newKey, previewCache.get(oldKey));
                     previewCache.delete(oldKey);
                 }
                 curFile = newFile;
@@ -3048,8 +3460,9 @@ jQuery(async () => {
         if (document.getElementById('extensions_settings2')
          || document.getElementById('extensions_settings')) injectSettings();
 
-        if (!document.getElementById('chatvault_open_btn') && loadSettings().enabled
-         || !document.getElementById('chatvault_settings')) {
+        const needBtn = loadSettings().enabled && !document.getElementById('chatvault_open_btn');
+        const needSet = !document.getElementById('chatvault_settings');
+        if (needBtn || needSet) {
             setTimeout(tryInject, 500);
         }
     };
