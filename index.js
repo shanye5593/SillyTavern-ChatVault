@@ -1,13 +1,14 @@
 /**
  * SillyTavern ChatVault — 全局聊天档案管理器
- * v0.2.3 — 修复手机端编辑弹窗顶起 + 导出折叠 + 滑块开关 + 导入图标改向内
+ * 版本号见下方 VERSION 常量（单一事实源）
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.2';
+const VERSION = '0.5.8-test';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
+const CHAR_PAGE_SIZE = 30;   // 「按角色」tab 每页角色卡数（含 0 聊天）
 const THEMES = [
     { id: 'dark',   name: '夜间 Dark' },
     { id: 'light',  name: '白底 Light' },
@@ -409,6 +410,12 @@ async function newChatFor(character) {
         if (!target) throw new Error('找不到角色（可能已被删除）');
         const chid = target.idx;
 
+        // v0.5.5-test: 关键判断 —— 该角色当前是否已经有聊天？
+        // - 有：select 会加载最近一条，再调 newChat 新建一条 → +1 条（正确）
+        // - 无：select 本身就会自动创建一条空聊天（ST 默认行为），如果再调 newChat
+        //       会出现两个时间戳一致但内容略不同的"重复"文件 —— 这就是用户报的 bug。
+        const hadExistingChats = (chatsByAvatar[character.avatar] || []).length > 0;
+
         const select = ctx.selectCharacterById || window.selectCharacterById;
         if (typeof select !== 'function') throw new Error('当前 ST 版本不支持自动切换角色');
         await select(chid);
@@ -421,6 +428,12 @@ async function newChatFor(character) {
 
         // 提前关闭面板（手机端同样的考量）
         closePanel();
+
+        if (!hadExistingChats) {
+            // 0 聊天角色：select 已经替我们新建了一条；不要再调 newChat 重复创建
+            toastr.success(`已为「${character.name || '角色'}」新建聊天`);
+            return;
+        }
 
         if (typeof ctx.newChat === 'function') {
             await ctx.newChat();
@@ -613,7 +626,7 @@ function openPanel() {
             <div class="cv-tabbar">
                 <div class="cv-tabs" id="cv_tabs">
                     <button class="cv-tab active" data-tab="recent">最近<span class="cv-tab-count" id="cv_count_recent"></span></button>
-                    <button class="cv-tab" data-tab="characters">按角色<span class="cv-tab-count" id="cv_count_characters"></span></button>
+                    <button class="cv-tab" data-tab="characters">角色<span class="cv-tab-count" id="cv_count_characters"></span></button>
                     <button class="cv-tab" data-tab="favorites">收藏<span class="cv-tab-count" id="cv_count_favorites"></span></button>
                     <button class="cv-tab" data-tab="current">当前角色<span class="cv-tab-count" id="cv_count_current"></span></button>
                 </div>
@@ -845,19 +858,27 @@ function viewCurrentCharacter() {
     return { character: c, items: list };
 }
 
-function viewByCharacter() {
+function viewByCharacter({ withChatsOnly = false } = {}) {
     // 按角色分组：[{character, chats: [...]}]，每组按时间倒序，组按"该组最新一条"倒序
+    // v0.5.4-test: 默认包含 0 聊天的角色，便于用每组的「新建聊天」按钮快建；
+    //              tab 数字 / 收藏视图等"旧语义"调用方传 withChatsOnly:true 仍只数有聊天的。
+    const q = (searchQuery || '').toLowerCase();
     const groups = [];
     for (const c of charactersCache) {
         const list = (chatsByAvatar[c.avatar] || [])
             .filter(ch => matchesSearch(c, ch))
             .sort((a, b) => timestampOf(b) - timestampOf(a));
-        if (list.length === 0 && searchQuery && !(c.name || '').toLowerCase().includes(searchQuery.toLowerCase())) continue;
-        if (list.length === 0 && !searchQuery) continue; // 无聊天的角色不展示
+        if (searchQuery) {
+            // 搜索时：聊天命中 OR 角色名命中 才显示
+            const nameHit = (c.name || '').toLowerCase().includes(q);
+            if (list.length === 0 && !nameHit) continue;
+        } else if (withChatsOnly && list.length === 0) {
+            continue;
+        }
         groups.push({ character: c, chats: list });
     }
     return groups.sort((a, b) => {
-        // 先按聊天数倒序（防止 0/1 条的角色抢位置），同数再按最新一条时间倒序
+        // 先按聊天数倒序（让 0 聊天的角色沉到最底，不抢位置），同数再按最新一条时间倒序
         if (b.chats.length !== a.chats.length) return b.chats.length - a.chats.length;
         const ta = a.chats[0] ? timestampOf(a.chats[0]) : 0;
         const tb = b.chats[0] ? timestampOf(b.chats[0]) : 0;
@@ -873,7 +894,9 @@ function updateTabCounts() {
     const totalAll = flatAllChats().length;
     const totalFav = flatAllChats().filter(({ character, chat }) =>
         getMetaFor(character.avatar, chat.file_name).starred).length;
-    const totalChars = viewByCharacter().length;
+    // v0.5.6-test: 「角色」tab 上的数字 = 已加载的全部角色卡数量（含 0 聊天），
+    // 与列表实际可见的总数对应，不再产生"显示 40 但其实有更多"的歧义。
+    const totalChars = (charactersCache || []).length;
     const cur = getCurrentCharacter();
     const totalCur = cur ? (chatsByAvatar[cur.avatar] || []).length : 0;
     const set = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
@@ -891,8 +914,13 @@ function render() {
     updateTabCounts();
 
     if (activeTab === 'characters') {
-        renderCharactersTab(body);
-        renderPagination(0, 1);
+        // v0.5.4-test: 「按角色」改为分页（每页 CHAR_PAGE_SIZE 张角色卡），含 0 聊天的角色
+        const groups = viewByCharacter();
+        const totalPagesC = Math.max(1, Math.ceil(groups.length / CHAR_PAGE_SIZE));
+        if (currentPage > totalPagesC) currentPage = totalPagesC;
+        const sliceC = groups.slice((currentPage - 1) * CHAR_PAGE_SIZE, currentPage * CHAR_PAGE_SIZE);
+        renderCharactersTab(body, sliceC);
+        renderPagination(groups.length, totalPagesC);
         return;
     }
 
@@ -978,10 +1006,11 @@ function render() {
     renderPagination(items.length, totalPages);
 }
 
-function renderCharactersTab(body) {
-    const groups = viewByCharacter();
+function renderCharactersTab(body, groups) {
+    // v0.5.4-test: groups 由 render() 切好分页后传入；不传则退化为全量（兼容旧调用）
+    if (!groups) groups = viewByCharacter();
     if (groups.length === 0) {
-        body.innerHTML = `<div class="cv-empty">${searchQuery ? '没有匹配的结果' : '没有任何聊天记录'}</div>`;
+        body.innerHTML = `<div class="cv-empty">${searchQuery ? '没有匹配的结果' : '没有任何角色'}</div>`;
         return;
     }
     // 搜索时默认全部展开，便于看到匹配结果；否则按用户记忆的状态（默认折叠）
@@ -990,12 +1019,14 @@ function renderCharactersTab(body) {
             ? `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`
             : '';
         const errMsg = errorsByAvatar[c.avatar];
+        const isEmpty = chats.length === 0;
         const right = errMsg
             ? `<span class="cv-group-error" title="${escapeHtml(errMsg)}">⚠ 加载失败</span>`
-            : `<span class="cv-group-count">共 ${chats.length} 条聊天</span>`;
-        const expanded = !!searchQuery || groupOpen.has(c.avatar);
+            : `<span class="cv-group-count">${isEmpty ? '暂无聊天' : `共 ${chats.length} 条聊天`}</span>`;
+        // 0 聊天的组：永远不展开（没东西可展开）；其余按搜索 / 记忆状态
+        const expanded = !isEmpty && (!!searchQuery || groupOpen.has(c.avatar));
         return `
-            <div class="cv-group ${expanded ? 'is-open' : ''}" data-avatar="${escapeHtml(c.avatar)}">
+            <div class="cv-group ${expanded ? 'is-open' : ''} ${isEmpty ? 'is-empty' : ''}" data-avatar="${escapeHtml(c.avatar)}">
                 <div class="cv-group-header">
                     <span class="cv-group-toggle">${ICONS.chevR}</span>
                     <img class="cv-group-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
@@ -1028,6 +1059,8 @@ function renderCharactersTab(body) {
             };
         }
         header.onclick = () => {
+            // v0.5.4-test: 0 聊天的组没东西可展开，避免无意义切换
+            if (g.classList.contains('is-empty')) return;
             const nowOpen = !g.classList.contains('is-open');
             g.classList.toggle('is-open', nowOpen);
             if (nowOpen) groupOpen.add(avatar);
@@ -1076,7 +1109,7 @@ function renderCard(character, chat, hideCharName = false) {
     const jumpLabel = active ? '已打开' : '继续';
 
     return `
-        <div class="cv-card ${active ? 'is-active' : ''}" data-avatar="${escapeHtml(character.avatar)}" data-file="${escapeHtml(chat.file_name)}">
+        <div class="cv-card ${active ? 'is-active' : ''}" data-avatar="${escapeHtml(character.avatar)}" data-name="${escapeHtml(character.name || '')}" data-file="${escapeHtml(chat.file_name)}">
             <img class="cv-card-avatar" src="${avatarUrl}" onerror="this.style.visibility='hidden'" alt="" />
             <div class="cv-card-main">
                 <div class="cv-card-row">
@@ -1110,7 +1143,7 @@ function renderCard(character, chat, hideCharName = false) {
 function renderPagination(total, totalPages) {
     const el = document.getElementById('cv_pagination');
     if (!el) return;
-    if (activeTab === 'characters' || total === 0) {
+    if (total === 0) {
         el.innerHTML = '';
         return;
     }
@@ -1130,8 +1163,12 @@ function renderPagination(total, totalPages) {
 function bindCardEvents() {
     document.querySelectorAll('.cv-card').forEach(card => {
         const avatar = card.dataset.avatar;
+        const cName  = card.dataset.name || '';
         const fileName = card.dataset.file;
-        const character = charactersCache.find(c => c.avatar === avatar);
+        // 同 avatar 不同 name 的角色（同一张 png 被复制成两个角色）会并存
+        // 必须 (avatar, name) 双键查找，否则操作会落到错的那个角色上
+        const character = charactersCache.find(c => c.avatar === avatar && (c.name || '') === cName)
+                       || charactersCache.find(c => c.avatar === avatar);
         if (!character) return;
 
         card.querySelectorAll('.cv-act').forEach(btn => {
@@ -1236,6 +1273,9 @@ function observePreviews() {
             if (text === null) {
                 el.classList.remove('is-loading'); el.classList.add('is-empty');
                 el.textContent = '（无法加载预览）';
+                // 失败仍然挂上 observer：缓存 TTL 过期后用户重新滚动到这里就会自动重试
+                // fetchLastMessageText 内部会按 cache 状态决定是否真发请求，不会浪费流量
+                previewObserver.observe(el);
             } else if (!text) {
                 el.classList.remove('is-loading'); el.classList.add('is-empty');
                 el.textContent = '（空聊天）';
@@ -2614,7 +2654,22 @@ function openEditModal(character, fileName) {
 
         // 1. 文件重命名（如改了）
         let curFile = fileName;
-        if (newFile && newFile !== fileName) {
+        if (newFile !== fileName) {
+            // 校验：空字符串、路径分隔符、控制字符、相对路径段一律拒绝
+            // 白名单：中英文数字 + 常见标点；服务端会再校验一次，这里只是给用户即时反馈
+            const FILENAME_RE = /^[\w.\u4e00-\u9fa5 \-()【】\[\]·、，,]+$/;
+            if (!newFile) {
+                toastr.warning('文件名不能为空');
+                return;
+            }
+            if (newFile.includes('/') || newFile.includes('\\') || newFile.includes('..')) {
+                toastr.error('文件名不能包含路径分隔符或 ..');
+                return;
+            }
+            if (!FILENAME_RE.test(stripExt(newFile))) {
+                toastr.error('文件名包含不允许的字符（仅允许字母数字中文及常见标点）');
+                return;
+            }
             try {
                 setStatus('正在重命名文件…');
                 await renameChat(character.avatar, fileName, newFile);
@@ -3033,20 +3088,24 @@ function matchHotkey(e, combo) {
         && !!e.metaKey  === combo.meta;
 }
 
+function _cvHotkeyHandler(e) {
+    const s = loadSettings();
+    if (!s.windowHotkey) return;
+    const combo = parseHotkeyCombo(s.windowHotkeyCombo || 'Alt+V');
+    if (!matchHotkey(e, combo)) return;
+    const t = e.target;
+    const tag = (t?.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return;
+    e.preventDefault();
+    if (panelEl) closePanel(); else openPanel();
+}
 function setupHotkey() {
-    if (window._cvHotkeyBound) return;
-    window._cvHotkeyBound = true;
-    document.addEventListener('keydown', (e) => {
-        const s = loadSettings();
-        if (!s.windowHotkey) return;
-        const combo = parseHotkeyCombo(s.windowHotkeyCombo || 'Alt+V');
-        if (!matchHotkey(e, combo)) return;
-        const t = e.target;
-        const tag = (t?.tagName || '').toLowerCase();
-        if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return;
-        e.preventDefault();
-        if (panelEl) closePanel(); else openPanel();
-    });
+    // 用命名函数引用，支持热重载/再次 setup 时清掉旧监听器，避免老 handler 残留
+    if (window._cvHotkeyHandler) {
+        document.removeEventListener('keydown', window._cvHotkeyHandler);
+    }
+    window._cvHotkeyHandler = _cvHotkeyHandler;
+    document.addEventListener('keydown', window._cvHotkeyHandler);
 }
 
 /* ============================================================
@@ -3064,11 +3123,21 @@ function applyCustomFont() {
     const fonts = Array.isArray(s.customFonts) ? s.customFonts : [];
     // 消毒：去掉可能用来注入额外 CSS 规则的字符
     const sanitize = (v) => String(v || '').replace(/['"\\;{}<>]/g, '').trim();
-    const sanitizeUrl = (v) => String(v || '').replace(/['"\\;<>]/g, '').trim();
-    const cleaned = fonts.map(f => ({
-        family: sanitize(f && f.family),
-        url:    sanitizeUrl(f && f.url),
-    })).filter(f => f.family || f.url);
+    // 字体 URL 消毒：除了引号/反斜杠/分号/尖括号外，还要剔除空白(含换行)、花括号、圆括号
+    // 防止攻击者通过换行符 + } 逃出 @font-face 块注入任意 CSS 规则
+    const sanitizeUrl = (v) => String(v || '').replace(/[\s'"\\;<>{}()]/g, '').trim();
+    // 仅允许 https:// 开头的 URL；http / data / blob / 相对路径都拒绝
+    const isAllowedUrl = (u) => /^https:\/\/[^\s]+$/i.test(u);
+    const cleaned = fonts.map(f => {
+        const family = sanitize(f && f.family);
+        const rawUrl = sanitizeUrl(f && f.url);
+        const url = (rawUrl && isAllowedUrl(rawUrl)) ? rawUrl : '';
+        // 用户填了 URL 但不合法时静默丢弃，避免污染样式表
+        if (rawUrl && !url) {
+            console.warn('[ChatVault] 字体 URL 未通过校验（仅允许 https://），已忽略:', rawUrl.slice(0, 80));
+        }
+        return { family, url };
+    }).filter(f => f.family || f.url);
     if (cleaned.length === 0) { style.textContent = ''; return; }
     // 关键：每条 URL 字体都用独立的内部固定名注册，避免污染酒馆全局命名
     // 优先级：第 1 条 URL 字体 → 第 1 条 family → 第 2 条 URL → 第 2 条 family → ... → 系统兜底
@@ -3291,7 +3360,7 @@ function injectSettings() {
               <button class="cv-font-btn cv-font-del" data-act="del" title="删除">×</button>
             </div>
             <input type="text" class="text_pole cv-font-input" data-field="family" placeholder="字体名（系统/酒馆已加载的；用作回退）" value="${escapeHtml(f.family || '')}">
-            <input type="text" class="text_pole cv-font-input" data-field="url"    placeholder="字体 URL（可选，以 https:// 开头的 .woff2/.ttf）" value="${escapeHtml(f.url || '')}">
+            <input type="text" class="text_pole cv-font-input" data-field="url"    placeholder="字体 URL（可选，以 https:// 开头，支持 .woff2/.woff/.ttf/.otf）" value="${escapeHtml(f.url || '')}">
           </div>
         `).join('');
     };
