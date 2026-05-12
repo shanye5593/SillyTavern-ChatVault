@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.9';
+const VERSION = '0.5.10';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -423,37 +423,42 @@ async function newChatFor(character) {
         if (!target) throw new Error('找不到角色（可能已被删除）');
         const chid = target.idx;
 
-        // v0.5.5-test: 关键判断 —— 该角色当前是否已经有聊天？
+        // 关键判断 —— 该角色当前是否已经有聊天？
         // - 有：select 会加载最近一条，再调 newChat 新建一条 → +1 条（正确）
-        // - 无：select 本身就会自动创建一条空聊天（ST 默认行为），如果再调 newChat
-        //       会出现两个时间戳一致但内容略不同的"重复"文件 —— 这就是用户报的 bug。
+        // - 无：select 副作用会自动建一条；但要小心 short-circuit
         const hadExistingChats = (chatsByAvatar[character.avatar] || []).length > 0;
+        const wasOnTarget = Number(ctx.characterId) === chid;
 
         const select = ctx.selectCharacterById || window.selectCharacterById;
         if (typeof select !== 'function') throw new Error('当前 ST 版本不支持自动切换角色');
         // 反幽灵：select 前预设 chat 字段为已知存在的聊天，避免 ST 找不到旧聊天而新建空聊天
         if (hadExistingChats) _ensureCharacterChatField(target.c);
-        await select(chid);
 
-        const ok = await waitFor(() => {
-            const c = SillyTavern.getContext();
-            return Number(c.characterId) === chid;
-        }, 3000);
-        if (!ok) throw new Error('角色切换超时');
+        if (!wasOnTarget) {
+            await select(chid);
+            const ok = await waitFor(() => {
+                return Number(SillyTavern.getContext().characterId) === chid;
+            }, 3000);
+            if (!ok) throw new Error('角色切换超时');
+        }
 
         // 提前关闭面板（手机端同样的考量）
         closePanel();
 
-        if (!hadExistingChats) {
-            // 0 聊天角色：select 已经替我们新建了一条；不要再调 newChat 重复创建
+        // 三种情况：
+        // a) hadExistingChats=false + 切了角色：select 副作用已自动建一条 → 不用再调
+        // b) hadExistingChats=false + 已在该角色：select short-circuit 没建 → 必须显式建（v0.5.10 修复）
+        // c) hadExistingChats=true：已加载最近一条，再 +1 条
+        if (!hadExistingChats && !wasOnTarget) {
             toastr.success(`已为「${character.name || '角色'}」新建聊天`);
             return;
         }
 
-        if (typeof ctx.newChat === 'function') {
-            await ctx.newChat();
-        } else if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
-            await ctx.executeSlashCommandsWithOptions('/newchat');
+        const ctx2 = SillyTavern.getContext();
+        if (typeof ctx2.newChat === 'function') {
+            await ctx2.newChat();
+        } else if (typeof ctx2.executeSlashCommandsWithOptions === 'function') {
+            await ctx2.executeSlashCommandsWithOptions('/newchat');
         } else {
             toastr.warning('已切换角色，但当前 ST 版本无法自动新建聊天，请手动新建');
             return;
@@ -2846,16 +2851,18 @@ async function handleDelete(character, fileName) {
             delete errorsByAvatar[character.avatar];
         }
         // 反幽灵：ST 内存里所有同名同 avatar 角色的 character.chat 如果还指向刚删的文件，
-        // 把它换成该角色现存的最新聊天（或清空）。否则下次切到该角色时 ST 会
-        // "找不到旧聊天 → 自动新建空聊天" → 出现 ~100B 的幽灵记录
+        // 还有剩余聊天 → 换成最新一条（避免 ST "找不到 → 自动建空聊天" 产生 ~100B 幽灵）
+        // 已 0 聊天 → 用 delete 移除字段；不能设 ''，否则 ST 后续 selectCharacterById 会
+        // 拿空字符串调 /api/chats/get 报 "Invalid character chat tail request"（v0.5.10 修复）
         try {
             const ctx = SillyTavern.getContext();
             const remaining = chatsByAvatar[character.avatar];
-            const fallback = remaining.length > 0 ? stripExt(remaining[0].file_name) : '';
+            const fallback = remaining.length > 0 ? stripExt(remaining[0].file_name) : null;
             const stripped = stripExt(fileName);
             ctx.characters.forEach(c => {
                 if (c.avatar === character.avatar && stripExt(c.chat || '') === stripped) {
-                    c.chat = fallback;
+                    if (fallback) c.chat = fallback;
+                    else delete c.chat;
                 }
             });
         } catch {}
