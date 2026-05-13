@@ -78,6 +78,9 @@ const DEFAULT_SETTINGS = {
     windowState: null,                 // 记忆位置：{ x, y, scale }
     // 是否在酒馆欢迎页底部追加「聊天档案」快捷按钮（与 API 连接/角色管理/扩展程序 同排）
     welcomeButton: true,
+    // v0.5.14 阅读模式增强渲染开关（表格/代码块/列表/引用/AI 内联 HTML 如 <img> <p style>）
+    // 默认 ON；如果遇到大图/超长表格卡顿，可关掉退回极简模式（仅识别 *斜* **粗**）
+    readerRichRender: true,
 };
 
 function loadSettings() {
@@ -1392,13 +1395,186 @@ function processMessageText(text, strip, extract) {
     return applyExtraction(applyStripping(text, strip), extract).trim();
 }
 
-// 极简 Markdown 行内渲染：只处理 **粗体** 和 *斜体*（同行内）
-// 必须在 escapeHtml 之后调用 —— escapeHtml 不动 *，所以可以安全二次替换
-// 设计取舍：跨行不识别、不支持 _ __ ` ~ 链接 等其它语法，避免误伤角色名/路径里的下划线
-function mdInline(escaped) {
-    return escaped
+// —— v0.5.11: 阅读模式 markdown 渲染（套餐 A + DOMPurify HTML 直通）——
+// 行内：***粗斜*** / **粗** / *斜* / ~~删除线~~ / `行内代码`
+// 块级：表格 / 围栏代码块 / 引用 / 无序/有序列表
+// HTML：AI 输出的 <p style> <span style> <details> 等经 DOMPurify 白名单 sanitize 后通过
+// 设计：标题 # / 链接 [](url) / 水平线 --- 故意不接，避免与 strip 选项及 RP 文学描写冲突
+
+function mdInlineRich(s) {
+    // s 必须已 escapeHtml；处理顺序：长 → 短，避免吃掉对方的星号
+    return s
+        .replace(/\*\*\*([^*\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')
         .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)/g, '<em>$1</em>');
+        .replace(/(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)/g, '<em>$1</em>')
+        .replace(/~~([^~\n]+?)~~/g, '<s>$1</s>')
+        .replace(/`([^`\n]+?)`/g, '<code class="cv-md-code">$1</code>');
+}
+function mdInline(escaped) { return mdInlineRich(escaped); } // 兼容旧调用点
+
+// 极简渲染（v0.5.14 当用户关闭「增强渲染」时使用）—— 仅 **粗** *斜*，按 \n+ 切段
+function renderLiteMd(raw) {
+    if (!raw) return '';
+    const segs = String(raw).split(/\n+/).map(s => s.trim()).filter(Boolean);
+    if (!segs.length) return '';
+    return segs.map(seg => {
+        const safe = escapeHtml(seg)
+            .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)/g, '<em>$1</em>');
+        return `<p class="cv-msg-p">${safe}</p>`;
+    }).join('');
+}
+
+// 智能 escape：行里出现疑似 HTML tag (`<tag>` / `<tag/>` / `<tag attr=...>`) 时整段不 escape，
+// 让 AI 嵌在文字中的 <img> <span style> <u> <mark> 等能正常渲染（最终由 DOMPurify 兜底安全）；
+// 否则按原规则 escape，保护 `1 < 2` `A & B` 等纯文本不被浏览器误解析。
+function maybeEscapeHtml(s) {
+    if (s == null) return '';
+    return /<[a-zA-Z][^>]{0,500}>/.test(String(s)) ? String(s) : escapeHtml(s);
+}
+
+function _cvParseTableRow(line) {
+    let s = line.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split(/(?<!\\)\|/).map(c => c.replace(/\\\|/g, '|'));
+}
+function _cvIsBlockStart(line, next) {
+    if (!line) return false;
+    if (/^```/.test(line)) return true;
+    if (/^\s*>\s?/.test(line)) return true;
+    if (/^\s*[-*]\s+/.test(line)) return true;
+    if (/^\s*\d+\.\s+/.test(line)) return true;
+    if (/^\s*\|.*\|\s*$/.test(line) && next && /^\s*\|[\s\-:|]+\|\s*$/.test(next)) return true;
+    if (/^\s*<[a-zA-Z][^>]*>/.test(line)) return true;
+    return false;
+}
+
+function renderRichMd(raw) {
+    if (!raw) return '';
+    const lines = String(raw).split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        const _iBefore = i; // 死循环兜底
+
+        // 围栏代码块 ```lang ... ```
+        const fence = line.match(/^```(\w*)\s*$/);
+        if (fence) {
+            const lang = fence[1] || '';
+            const codeLines = [];
+            i++;
+            while (i < lines.length && !/^```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+            if (i < lines.length) i++; // 吃掉收尾 ```
+            const langAttr = /^[a-zA-Z0-9_+-]{1,20}$/.test(lang) ? ` class="language-${lang}"` : '';
+            out.push(`<pre class="cv-md-pre"><code${langAttr}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            continue;
+        }
+
+        // 表格
+        if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s\-:|]+\|\s*$/.test(lines[i + 1])) {
+            const header = _cvParseTableRow(line);
+            const sep = _cvParseTableRow(lines[i + 1]);
+            const aligns = sep.map(c => {
+                const t = c.trim();
+                if (/^:-+:$/.test(t)) return 'center';
+                if (/^:-+$/.test(t)) return 'left';
+                if (/^-+:$/.test(t)) return 'right';
+                return '';
+            });
+            i += 2;
+            const body = [];
+            while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { body.push(_cvParseTableRow(lines[i])); i++; }
+            const cell = (c, j, tag) => {
+                const al = aligns[j] ? ` style="text-align:${aligns[j]}"` : '';
+                return `<${tag}${al}>${mdInlineRich(maybeEscapeHtml((c || '').trim()))}</${tag}>`;
+            };
+            const tr = (cells, tag) => '<tr>' + cells.map((c, j) => cell(c, j, tag)).join('') + '</tr>';
+            out.push(`<table class="cv-md-table"><thead>${tr(header, 'th')}</thead><tbody>${body.map(r => tr(r, 'td')).join('')}</tbody></table>`);
+            continue;
+        }
+
+        // 引用（连续 > 合并）
+        if (/^\s*>\s?/.test(line)) {
+            const quoted = [];
+            while (i < lines.length && /^\s*>\s?/.test(lines[i])) { quoted.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+            const inner = quoted.map(q => mdInlineRich(maybeEscapeHtml(q))).join('<br>');
+            out.push(`<blockquote class="cv-md-quote">${inner}</blockquote>`);
+            continue;
+        }
+
+        // 无序列表
+        if (/^\s*[-*]\s+/.test(line)) {
+            const items = [];
+            while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*]\s+/, '')); i++; }
+            out.push(`<ul class="cv-md-ul">${items.map(it => `<li>${mdInlineRich(maybeEscapeHtml(it))}</li>`).join('')}</ul>`);
+            continue;
+        }
+
+        // 有序列表
+        if (/^\s*\d+\.\s+/.test(line)) {
+            const items = [];
+            while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, '')); i++; }
+            out.push(`<ol class="cv-md-ol">${items.map(it => `<li>${mdInlineRich(maybeEscapeHtml(it))}</li>`).join('')}</ol>`);
+            continue;
+        }
+
+        // 空行
+        if (line.trim() === '') { i++; continue; }
+
+        // HTML 直通行（以 <tag> 开头，整段不再 escape，也不包 <p>）
+        // 注意：进入此分支时 line 本身就是 HTML 起始 —— 必须先消费 line 再用 _cvIsBlockStart 判后续行，否则死循环
+        if (/^\s*<[a-zA-Z][^>]*>/.test(line)) {
+            const htmlBuf = [line];
+            i++;
+            while (i < lines.length && lines[i].trim() !== '' && !_cvIsBlockStart(lines[i], lines[i + 1])) {
+                htmlBuf.push(lines[i]); i++;
+            }
+            out.push(htmlBuf.join('\n'));
+            continue;
+        }
+
+        // 普通段落（按行包 <p>，配合首行缩进 CSS）
+        out.push(`<p class="cv-msg-p">${mdInlineRich(maybeEscapeHtml(line))}</p>`);
+        i++;
+
+        // 死循环防御：若任一分支忘了递增 i，强制前进，避免卡死浏览器
+        if (i === _iBefore) i++;
+    }
+    return out.join('');
+}
+
+// DOMPurify 白名单：允许 AI 内联样式 / 表格 / details 等，砍掉 script/iframe/事件/危险协议
+function sanitizeMd(html) {
+    if (!html) return '';
+    const DP = (typeof window !== 'undefined') ? window.DOMPurify : null;
+    if (DP && typeof DP.sanitize === 'function') {
+        try {
+            return DP.sanitize(html, {
+                ALLOWED_TAGS: [
+                    'p', 'br', 'span', 'div', 'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins',
+                    'code', 'pre', 'blockquote', 'ul', 'ol', 'li', 'hr',
+                    'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+                    'sub', 'sup', 'small', 'mark', 'details', 'summary', 'font', 'a', 'img',
+                    // v0.5.13 扩展：标题 + 语义 + 图配说明 + 定义列表
+                    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                    'figure', 'figcaption',
+                    'kbd', 'abbr', 'q', 'cite', 'time', 'ruby', 'rt', 'rp', 'bdi', 'bdo', 'wbr',
+                    'dl', 'dt', 'dd',
+                ],
+                ALLOWED_ATTR: [
+                    'style', 'class', 'title', 'colspan', 'rowspan',
+                    'align', 'color', 'size', 'face', 'open',
+                    'href', 'target', 'rel', 'alt', 'src',
+                ],
+                ALLOWED_URI_REGEXP: /^(?:https?|mailto|data:image\/(?:png|jpeg|gif|webp|svg\+xml)):/i,
+                FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base', 'style'],
+                FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onmouseenter', 'onmouseleave', 'onfocus', 'onblur', 'onchange', 'onsubmit', 'onkeydown', 'onkeyup', 'onkeypress', 'onanimationend', 'onanimationstart', 'ontransitionend'],
+            });
+        } catch { /* fallthrough */ }
+    }
+    return html;
 }
 
 /* ============================================================
@@ -1573,14 +1749,19 @@ function renderReader() {
         </div>
     `;
 
+    // v0.5.15 fix: renderReader 顶层没有 s 变量，必须显式 load
+    const _readerCfg = loadSettings();
+    const _useRichRender = _readerCfg.readerRichRender !== false;
+
     const cardHtml = slice.map(m => {
         const who = escapeHtml(m.who);
         // 把消息按段落（连续换行视作分段）拆成 <p>，单换行保留为 <br>，便于首行缩进
         // 每个非空"行"包成一段，让首行缩进对每段生效（包含连续换行产生的空行也被丢弃）
         const text = m.text
-            ? m.text.split(/\n+/).map(s => s.trim()).filter(Boolean)
-                .map(seg => `<p class="cv-msg-p">${mdInline(escapeHtml(seg))}</p>`).join('')
-              || '<span class="cv-reader-empty">（空）</span>'
+            ? ((_useRichRender
+                    ? sanitizeMd(renderRichMd(m.text))
+                    : renderLiteMd(m.text))
+                || '<span class="cv-reader-empty">（空）</span>')
             : '<span class="cv-reader-empty">（空）</span>';
         // user 头像：若聊天 meta 里绑定了 persona 文件名，走 /thumbnail（零附加存储）；否则首字徽章
         const userAvHtml = boundUserAvatarUrl
@@ -3412,6 +3593,15 @@ function injectSettings() {
               ${THEMES.map(t => `<option value="${t.id}" ${s.theme === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
             </select>
           </div>
+          <div class="cv-settings-row">
+            <label class="checkbox_label" for="cv_set_rich_render">
+              <input type="checkbox" id="cv_set_rich_render" ${s.readerRichRender !== false ? 'checked' : ''}>
+              <span>阅读模式增强渲染（表格 / 代码块 / 列表 / 引用 / AI 内联 HTML 如 &lt;img&gt;）</span>
+            </label>
+          </div>
+          <div class="cv-settings-hint" style="margin:-4px 0 6px; opacity:0.75;">
+            💡 关掉后仅识别 *斜体* 和 **粗体**，遇到大图 / 超长表格卡顿时可临时关闭。
+          </div>
           <hr style="border:none; border-top:1px solid var(--cv-border, rgba(127,127,127,0.25)); margin:10px 0;">
 
           <!-- 字体设置（折叠） -->
@@ -3497,6 +3687,14 @@ function injectSettings() {
         const cur = loadSettings();
         saveSettings({ ...cur, welcomeButton: !!e.target.checked });
         applyWelcomeButtonState();
+    });
+    wrap.querySelector('#cv_set_rich_render').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, readerRichRender: !!e.target.checked });
+        // 若阅读模式正打开，立即重渲染当前页
+        if (typeof readerState !== 'undefined' && readerState && readerState.active) {
+            try { renderReader(); } catch {}
+        }
     });
     wrap.querySelector('#cv_set_theme').addEventListener('change', (e) => {
         const cur = loadSettings();
