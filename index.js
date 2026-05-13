@@ -100,6 +100,10 @@ function loadSettings() {
             s.customFonts = [{ family: String(s.customFontFamily || ''), url: String(s.customFontUrl || '') }];
         }
         delete s.customFontFamily; delete s.customFontUrl;
+        // v0.5.16 规范化：boolean 字段防御损坏 / 字符串 'false' / null / undefined 误判
+        // 只把"明确 false"和"明确字符串 'false' / 数字 0"视作关；其它一律按默认 true
+        const _falsey = (v) => v === false || v === 'false' || v === 0 || v === '0';
+        s.readerRichRender = !_falsey(s.readerRichRender);
         return s;
     } catch {
         return { ...DEFAULT_SETTINGS };
@@ -1572,9 +1576,13 @@ function sanitizeMd(html) {
                 FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base', 'style'],
                 FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onmouseenter', 'onmouseleave', 'onfocus', 'onblur', 'onchange', 'onsubmit', 'onkeydown', 'onkeyup', 'onkeypress', 'onanimationend', 'onanimationstart', 'ontransitionend'],
             });
-        } catch { /* fallthrough */ }
+        } catch (e) {
+            console.warn('[ChatVault] DOMPurify.sanitize 抛错，按 fail-closed 退化为字面文本：', e);
+        }
     }
-    return html;
+    // fail-closed：DOMPurify 不存在或抛错时，**绝不**返回原始 html（否则任何 <script> / on*= 都会被浏览器执行）
+    // 退化为「把 HTML 当字面字符串显示」—— 用户能看到原文但不会被攻击
+    return escapeHtml(html);
 }
 
 /* ============================================================
@@ -3384,8 +3392,9 @@ function initWindowChrome(overlay, panel) {
         applyTransform(panel, getCurrentState(panel));
     };
     window.addEventListener('resize', onWinResize);
-    // 把引用挂到 panel 上，closePanel 时拆除，避免反复开关后监听器堆积
-    panel._cvOnResize = onWinResize;
+    // v0.5.16 fix: 必须挂在 overlay（= panelEl）上，因为 closePanel 用 panelEl._cvOnResize 查找；
+    // 之前挂在 inner panel 节点上 → closePanel 永远找不到 → 反复开关面板 resize 监听器无限堆积
+    overlay._cvOnResize = onWinResize;
 }
 
 function resetWindow() {
@@ -3921,6 +3930,10 @@ jQuery(async () => {
     applyCustomFont();
     applyCustomColors();
     setupHotkey();
+    // v0.5.16 fix: 给注入轮询加重试上限，避免酒馆某些定制 UI 永远不出现 #extensions_settings 时
+    //              500ms 一次的 setTimeout 死循环常驻后台 CPU
+    let _injectTries = 0;
+    const INJECT_MAX_TRIES = 60; // 60 * 500ms = 30s 上限
     const tryInject = () => {
         if (document.getElementById('extensionsMenu')) applyEnabledState();
         if (document.getElementById('extensions_settings2')
@@ -3928,11 +3941,16 @@ jQuery(async () => {
         // 欢迎页按钮：等 #chat 就绪后挂 observer（observer 自己会重试）
         if (document.getElementById('chat')) applyWelcomeButtonState();
 
-        const needBtn = loadSettings().enabled && !document.getElementById('chatvault_open_btn');
+        const cur = loadSettings();
+        const needBtn = cur.enabled && !document.getElementById('chatvault_open_btn');
         const needSet = !document.getElementById('chatvault_settings');
-        const needWelcomeObs = loadSettings().enabled && loadSettings().welcomeButton && !_cvWelcomeObserver;
+        const needWelcomeObs = cur.enabled && cur.welcomeButton && !_cvWelcomeObserver;
         if (needBtn || needSet || needWelcomeObs) {
-            setTimeout(tryInject, 500);
+            if (++_injectTries < INJECT_MAX_TRIES) {
+                setTimeout(tryInject, 500);
+            } else {
+                console.warn('[ChatVault] 注入重试已达上限（30s），放弃后台轮询。如需重试请刷新页面。');
+            }
         }
     };
     tryInject();
