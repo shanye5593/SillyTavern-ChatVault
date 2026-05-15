@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.10';
+const VERSION = '0.5.3';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -32,7 +32,7 @@ const DEFAULT_EXTRACT = {
     custom: [],               // [{open, close}, ...]
 };
 const DEFAULT_USER_RULES = {
-    enabled: false,
+    enabled: true,                            // v0.5.22 起新用户默认启用；老用户存档若为 false 则保持兼容
     strip: {
         thinking: false, think: false, htmlComment: false,
         selfClosing: false, mdHeaders: false,
@@ -45,12 +45,19 @@ const DEFAULT_USER_RULES = {
         custom: [],
     },
 };
+// v0.5.17/0.5.18 自定义正则默认值
+const DEFAULT_CUSTOM_REGEX = { builtinFold: true, items: [] };
+
 const DEFAULT_SETTINGS = {
     enabled: true,
     theme: 'dark',
     // 摘取规则（v0.3.14 起阅读 / 导出共用一套，从主面板卡片折叠区进入编辑）
     strip:   { ...DEFAULT_STRIP },
     extract: { ...DEFAULT_EXTRACT },
+    // v0.5.17 自定义正则（仅渲染时清洗，不修改原文件；不支持酒馆 placement / depth / 宏）
+    // items: [{ name, pattern, flags, replace, target: 'user'|'ai'|'both', enabled }]
+    // builtinFold: 内置「通用折叠」开关，默认 ON
+    customRegex: { ...DEFAULT_CUSTOM_REGEX },
     userRules: JSON.parse(JSON.stringify(DEFAULT_USER_RULES)),
     // 分页器模式: 'always' = 常驻底部, 'autoHide' = 下滑隐藏/上滑出现（同时控制悬浮按钮）
     readerPagerMode: 'autoHide',
@@ -91,6 +98,10 @@ function loadSettings() {
             if (s.readStrip)      s.strip     = { ...DEFAULT_STRIP,   ...s.readStrip };
             if (s.readExtract)    s.extract   = { ...DEFAULT_EXTRACT, ...s.readExtract };
             if (s.userReadRules)  s.userRules = JSON.parse(JSON.stringify(s.userReadRules));
+            // v0.5.25: 一次性清洗——v0.5.21 曾把"折叠态"写进 userRules.enabled，
+            // 导致老用户存档里 enabled=false 卡死、UI 又没开关翻回来 → user 单独规则永久失效。
+            // 现在彻底废弃该字段：load 时强制 true，运行路径也不再读它。
+            if (s.userRules && s.userRules.enabled === false) s.userRules.enabled = true;
             delete s.readStrip; delete s.readExtract; delete s.userReadRules;
             try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch {}
         }
@@ -110,7 +121,13 @@ function loadSettings() {
     }
 }
 function saveSettings(s) {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    // v0.5.24: 容错——配额耗尽 / Safari 隐私模式等场景不要让整条交互链断掉
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    } catch (e) {
+        console.error('[ChatVault] 设置保存失败（可能是存储配额已满）', e);
+        try { toastr.error('设置保存失败：浏览器存储已满或被禁用'); } catch {}
+    }
 }
 function currentThemeClass() {
     const id = loadSettings().theme;
@@ -824,8 +841,9 @@ async function loadAll() {
     } catch (e) {
         console.error('[ChatVault] 加载失败', e);
         setStatus(`❌ 加载失败: ${e.message}`);
-        document.getElementById('cv_body').innerHTML =
-            `<div class="cv-empty">加载失败：${escapeHtml(e.message)}</div>`;
+        // v0.5.24: 加载失败回调可能在面板已关闭后才触发，此时 cv_body 不存在，要判空
+        const body = document.getElementById('cv_body');
+        if (body) body.innerHTML = `<div class="cv-empty">加载失败：${escapeHtml(e.message)}</div>`;
     }
 }
 
@@ -1394,9 +1412,53 @@ function applyExtraction(text, extract) {
     return parts.join('\n\n');
 }
 
-// 完整管线：先剥离再提取
-function processMessageText(text, strip, extract) {
-    return applyExtraction(applyStripping(text, strip), extract).trim();
+// v0.5.18 内置「通用折叠」正则：把"以下/以上是用户的本轮输入"或 <用户本轮输入> 标记
+// 后的整段（包括标记本身）当作上下文泄漏直接删掉。社区通用正则，target=both。
+const BUILTIN_REGEX_FOLD = /(^(?:(?:以下|以上)是用户的本轮输入|<用户本轮输入>)[\s\S]*$)/m;
+
+// v0.5.17 自定义正则：在 strip 之后、extract 之前作用，与 strip 同性质（删除/替换）
+// items: [{ name, pattern, flags, replace, target: 'user'|'ai'|'both', enabled }]
+// target 决定是否对当前消息生效；isUser 由调用方传入；缺省 target 当 'both'
+// v0.5.18: 增加内置 builtinFold 步骤（默认 ON），优先于 items 跑
+function applyCustomRegex(text, customRegex, isUser) {
+    if (typeof text !== 'string' || !text) return text || '';
+    if (!customRegex) return text;
+    let out = text;
+    // 内置「通用折叠」：customRegex.builtinFold !== false 时启用（默认 true）
+    if (customRegex.builtinFold !== false) {
+        try { out = out.replace(BUILTIN_REGEX_FOLD, ''); } catch {}
+    }
+    if (!Array.isArray(customRegex.items) || !customRegex.items.length) {
+        return out === text ? text : out.replace(/\n{3,}/g, '\n\n').trim();
+    }
+    // v0.5.24: ReDoS 护栏。JS 单线程无法真正给同步 regex 加超时，只能缩攻击面：
+    //   · pattern 单条上限 1000 字符（正常用户写不到）
+    //   · 单条消息正文超过 500KB 直接跳过自定义正则（保留剥离/提取/builtin）
+    //   · 启用条数硬上限 50（防被诱导导入巨型 JSON）
+    if (out.length > 500_000) return out.replace(/\n{3,}/g, '\n\n').trim();
+    let processed = 0;
+    for (const it of customRegex.items) {
+        if (processed >= 50) break;
+        if (!it || it.enabled === false) continue;
+        if (typeof it.pattern !== 'string' || !it.pattern) continue;
+        if (it.pattern.length > 1000) continue;        // 异常长 pattern 拒绝构造
+        const target = it.target || 'both';
+        if (target === 'user' && !isUser) continue;
+        if (target === 'ai'   &&  isUser) continue;
+        let re;
+        try { re = new RegExp(it.pattern, typeof it.flags === 'string' ? it.flags : 'g'); }
+        catch { continue; }                        // 写错的正则跳过，不炸整条消息
+        const repl = typeof it.replace === 'string' ? it.replace : '';
+        try { out = out.replace(re, repl); } catch { continue; }
+        processed++;
+    }
+    return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// 完整管线：剥离 → 自定义正则 → 提取
+// customRegex / isUser 形参可选（旧调用点不传时跳过自定义正则步骤，向后兼容）
+function processMessageText(text, strip, extract, customRegex, isUser) {
+    return applyExtraction(applyCustomRegex(applyStripping(text, strip), customRegex, isUser), extract).trim();
 }
 
 // —— v0.5.11: 阅读模式 markdown 渲染（套餐 A + DOMPurify HTML 直通）——
@@ -1658,8 +1720,12 @@ function readerCfg() {
     return {
         strip:   { ...DEFAULT_STRIP,   ...(cfg.strip   || {}) },
         extract: { ...DEFAULT_EXTRACT, ...(cfg.extract || {}) },
+        // v0.5.17 自定义正则：必须透出，否则 renderReader 拿到的 cfg.customRegex 是 undefined → 阅读模式正则不生效
+        // v0.5.18 用 DEFAULT_CUSTOM_REGEX 兜底，老用户没有 builtinFold 字段时也能拿到默认 true
+        customRegex: { ...DEFAULT_CUSTOM_REGEX, ...(cfg.customRegex || {}) },
         userRules: {
-            enabled: !!u.enabled,
+            // v0.5.25: enabled 字段彻底废弃（UI 已无开关）。运行路径不再读它，留 true 仅为存档兼容。
+            enabled: true,
             strip:   { ...DEFAULT_STRIP,   ...(u.strip   || {}) },
             extract: { ...DEFAULT_EXTRACT, ...(u.extract || {}) },
         },
@@ -1722,16 +1788,19 @@ function renderReader() {
         ? `/thumbnail?type=persona&file=${encodeURIComponent(boundUserAvatarFile)}`
         : '';
 
-    // 处理 + 缓存（依赖 strip/extract/userRules 配置，不含 style）
-    const cfgSig = JSON.stringify({ s: cfg.strip, e: cfg.extract, u: cfg.userRules });
+    // 处理 + 缓存（依赖 strip/extract/userRules/customRegex 配置，不含 style）
+    // v0.5.17: cfgSig 纳入 customRegex，否则改了正则不会重算缓存
+    const cfgSig = JSON.stringify({ s: cfg.strip, e: cfg.extract, u: cfg.userRules, r: cfg.customRegex });
     if (readerState._cfgSig !== cfgSig || !readerState._processed) {
         readerState._cfgSig = cfgSig;
         readerState._processed = messages.map((m, idx) => {
             const isUser = !!m?.is_user;
-            const useUser = cfg.userRules.enabled && isUser;
+            // v0.5.25: enabled 字段废弃（v0.5.21 曾错误地把折叠态写进它，导致部分用户卡死 false）。
+            // user 消息一律走 user-rules；想关掉就把下面的 user · 剥离 / 提取 单项关掉即可。
+            const useUser = isUser;
             const s = useUser ? cfg.userRules.strip : cfg.strip;
             const e = useUser ? cfg.userRules.extract : cfg.extract;
-            const text = (m && typeof m.mes === 'string') ? processMessageText(m.mes, s, e) : '';
+            const text = (m && typeof m.mes === 'string') ? processMessageText(m.mes, s, e, cfg.customRegex, isUser) : '';
             // user 名字优先用消息自身记录的 m.name（兼容多 persona 聊天），否则用文件级 userName
             const rawName = m?.name && m.name !== 'unused' ? m.name : '';
             const who = isUser ? (rawName || userName) : (rawName || charName);
@@ -1926,6 +1995,9 @@ function bindReaderMsgMenu() {
 function closeMsgMenu() {
     const m = document.getElementById('cv_msg_menu');
     if (m) {
+        // v0.5.24: 监听器是延迟到 setTimeout 才注册的；如果在 timeout 触发前关闭菜单，
+        //          需要先 clearTimeout 阻止"菜单已 remove 但监听器才挂上"的孤儿监听器泄漏。
+        if (m._pendingTimer) { clearTimeout(m._pendingTimer); m._pendingTimer = null; }
         try { m._cleanup && m._cleanup(); } catch {}
         m.remove();
     }
@@ -1975,7 +2047,9 @@ function openMsgMenu(msgEl, x, y) {
         if (menu.contains(ev.target)) return;
         closeMsgMenu();
     };
-    setTimeout(() => {
+    // v0.5.24: 保存 timer id，closeMsgMenu 才能在监听器挂上之前撤销，避免孤儿监听器泄漏
+    menu._pendingTimer = setTimeout(() => {
+        menu._pendingTimer = null;
         document.addEventListener('mousedown', onDocDown, true);
         document.addEventListener('touchstart', onDocDown, true);
     }, 0);
@@ -2131,6 +2205,8 @@ function mountRulesEditor(host, opts) {
     const userR    = { ...DEFAULT_USER_RULES, ...(getAt(cfg, userPath)  || {}) };
     const ustrip   = { ...DEFAULT_STRIP,   ...(userR.strip   || {}) };
     const uextract = { ...DEFAULT_EXTRACT, ...(userR.extract || {}) };
+    // v0.5.18 自定义正则配置（带内置开关）
+    const creCfg   = { ...DEFAULT_CUSTOM_REGEX, ...(cfg.customRegex || {}) };
     const sw = (id, on, label) => `
         <label class="cv-switch-row">
             <span class="cv-switch-label">${label}</span>
@@ -2140,45 +2216,53 @@ function mountRulesEditor(host, opts) {
             </span>
         </label>`;
 
+    // v0.5.18 全部 4 个区块改为可折叠，默认全部收起（用户反馈"东西太多"）
+    // 共用 .cv-fold-box / .cv-fold-toggle / .cv-fold-body 结构 + 一个委托 click handler
     host.innerHTML = `
-        <div class="cv-strip-box">
-            <div class="cv-strip-title">剥离（默认 · 适用于 AI / 角色消息）</div>
-            ${sw(`${px}_s_thinking`, strip.thinking,    '&lt;thinking&gt;…&lt;/thinking&gt;')}
-            ${sw(`${px}_s_think`,    strip.think,       '&lt;think&gt;…&lt;/think&gt;')}
-            ${sw(`${px}_s_html`,     strip.htmlComment, 'HTML 注释')}
-            ${sw(`${px}_s_self`,     strip.selfClosing, '自闭合占位标签 &lt;XxxxImpl/&gt;')}
-            ${sw(`${px}_s_md`,       strip.mdHeaders,   'Markdown 标题行（### 正文）')}
-            <div class="cv-strip-custom-title">自定义剥离对</div>
-            <div id="${px}_s_list"></div>
-            <button class="cv-btn cv-strip-add" id="${px}_s_add" type="button">+ 添加</button>
-        </div>
-        <div class="cv-strip-box">
-            <div class="cv-strip-title">
-                提取（只保留这些标签内的内容）
-                <button class="cv-info-btn" type="button" id="${px}_e_info" title="点击查看说明">!</button>
+        <div class="cv-strip-box cv-fold-box" data-collapsed="1">
+            <div class="cv-strip-title cv-fold-toggle">
+                <span class="cv-bm-title-label"><span>剥离</span></span>
+                <span class="cv-bm-chev">▾</span>
             </div>
-            <div class="cv-info-tip" id="${px}_e_info_tip" hidden>
-                <b>提取功能注意</b>：开启后，正文必须被对应标签完整包裹（例：<code>&lt;content&gt;…&lt;/content&gt;</code>），否则——<br>
-                · 如果原文没有用对应标签包裹正文，该消息将显示为空；<br>
-                · 如果包裹错误（标签未闭合），同样为空。<br>
-                正文消失时请关闭提取，或确认标签格式一致。
+            <div class="cv-fold-body" hidden>
+                <div class="cv-field-hint">默认规则 · 适用于 AI / 角色消息（user 消息走"user 单独规则"）</div>
+                ${sw(`${px}_s_thinking`, strip.thinking,    '&lt;thinking&gt;…&lt;/thinking&gt;')}
+                ${sw(`${px}_s_think`,    strip.think,       '&lt;think&gt;…&lt;/think&gt;')}
+                ${sw(`${px}_s_html`,     strip.htmlComment, 'HTML 注释')}
+                ${sw(`${px}_s_self`,     strip.selfClosing, '自闭合占位标签 &lt;XxxxImpl/&gt;')}
+                ${sw(`${px}_s_md`,       strip.mdHeaders,   'Markdown 标题行（### 正文）')}
+                <div class="cv-strip-custom-title">自定义剥离对</div>
+                <div id="${px}_s_list"></div>
+                <button class="cv-btn cv-strip-add" id="${px}_s_add" type="button">+ 添加</button>
             </div>
-            ${sw(`${px}_e_content`, extract.content, '&lt;content&gt;…&lt;/content&gt;')}
-            ${sw(`${px}_e_reply`,   extract.reply,   '&lt;reply&gt;…&lt;/reply&gt;')}
-            <div class="cv-strip-custom-title">自定义提取对</div>
-            <div id="${px}_e_list"></div>
-            <button class="cv-btn cv-strip-add" id="${px}_e_add" type="button">+ 添加</button>
         </div>
-        <div class="cv-strip-box cv-user-rules-box">
-            <label class="cv-switch-row">
-                <span class="cv-switch-label"><b>user 消息单独规则</b></span>
-                <span class="cv-switch">
-                    <input type="checkbox" id="${px}_u_enabled" ${userR.enabled?'checked':''}/>
-                    <span class="cv-switch-track"><span class="cv-switch-thumb"></span></span>
-                </span>
-            </label>
-            <div class="cv-field-hint">开启后，user 消息按下面这组规则处理（覆盖默认规则）。</div>
-            <div class="cv-user-rules-body" ${userR.enabled?'':'hidden'}>
+        <div class="cv-strip-box cv-fold-box" data-collapsed="1">
+            <div class="cv-strip-title cv-fold-toggle">
+                <span class="cv-bm-title-label"><span>提取</span></span>
+                <span class="cv-bm-chev">▾</span>
+            </div>
+            <div class="cv-fold-body" hidden>
+                <div class="cv-field-hint">只保留这些标签内的内容</div>
+                <div class="cv-info-tip">
+                    <b>提取功能注意</b>：开启后只保留对应标签内的内容（例：<code>&lt;content&gt;…&lt;/content&gt;</code>）。<br>
+                    · 原文中<b>完全没出现</b>任一启用的标签：保留原文（兜底，避免消息消失）；<br>
+                    · 标签存在但<b>内部为空</b>或仅有空白：渲染结果就是空；<br>
+                    · 标签未正确闭合：当成不存在处理，按上面第一条走。
+                </div>
+                ${sw(`${px}_e_content`, extract.content, '&lt;content&gt;…&lt;/content&gt;')}
+                ${sw(`${px}_e_reply`,   extract.reply,   '&lt;reply&gt;…&lt;/reply&gt;')}
+                <div class="cv-strip-custom-title">自定义提取对</div>
+                <div id="${px}_e_list"></div>
+                <button class="cv-btn cv-strip-add" id="${px}_e_add" type="button">+ 添加</button>
+            </div>
+        </div>
+        <div class="cv-strip-box cv-fold-box cv-user-rules-box" data-collapsed="1">
+            <div class="cv-strip-title cv-fold-toggle">
+                <span class="cv-bm-title-label"><span>user 消息单独规则</span></span>
+                <span class="cv-bm-chev">▾</span>
+            </div>
+            <div class="cv-fold-body" hidden>
+                <div class="cv-field-hint">user 消息使用下面这组规则</div>
                 <div class="cv-strip-subbox">
                     <div class="cv-strip-subtitle">user · 剥离</div>
                     ${sw(`${px}_us_recall`,     ustrip.recall,     '&lt;recall&gt;…&lt;/recall&gt;')}
@@ -2196,7 +2280,60 @@ function mountRulesEditor(host, opts) {
                 </div>
             </div>
         </div>
+        <div class="cv-strip-box cv-fold-box cv-cre-box" data-collapsed="1">
+            <div class="cv-strip-title cv-fold-toggle">
+                <span class="cv-bm-title-label"><span>自定义正则</span></span>
+                <span class="cv-bm-chev">▾</span>
+            </div>
+            <div class="cv-fold-body" hidden>
+                <div class="cv-field-hint">仅作用于阅读模式与 txt 导出，不修改原文件。不支持酒馆宏与位置/深度限制；上传酒馆 JSON 时这些字段会被忽略。</div>
+                <label class="cv-switch-row">
+                    <span class="cv-switch-label">
+                        通用折叠（隐藏"以下/以上是用户的本轮输入"等上下文泄漏）
+                        <code class="cv-cre-builtin-preview">${escapeHtml(BUILTIN_REGEX_FOLD.toString())}</code>
+                    </span>
+                    <span class="cv-switch">
+                        <input type="checkbox" id="${px}_cre_builtin" ${creCfg.builtinFold !== false ? 'checked' : ''}/>
+                        <span class="cv-switch-track"><span class="cv-switch-thumb"></span></span>
+                    </span>
+                </label>
+                <div class="cv-info-tip">
+                    <b>使用建议</b>：<br>
+                    · 如果"user 消息单独规则"已经能把上下文提取干净，<b>不要</b>再开这条；<br>
+                    · 如果开启后某条 user 消息渲染为空，<b>关掉这条</b>再看。
+                </div>
+                <div id="${px}_cre_list"></div>
+                <div class="cv-cre-actions">
+                    <button class="cv-btn cv-strip-add" id="${px}_cre_add" type="button">+ 创建</button>
+                    <button class="cv-btn cv-strip-add" id="${px}_cre_upload_btn" type="button">↑ 上传 JSON</button>
+                    <input type="file" id="${px}_cre_upload" accept=".json,application/json" multiple hidden/>
+                </div>
+            </div>
+        </div>
     `;
+
+    // v0.5.18 折叠区委托 handler（一次绑定，覆盖所有 .cv-fold-toggle）
+    // v0.5.21: 折叠纯视觉，不再绑定任何启用态。user 单独规则始终生效（见 readerCfg / 导出处的 useUser）
+    host.addEventListener('click', (e) => {
+        const t = e.target.closest('.cv-fold-toggle');
+        if (!t || !host.contains(t)) return;
+        const box = t.closest('.cv-fold-box');
+        if (!box) return;
+        const body = box.querySelector(':scope > .cv-fold-body');
+        const wasCollapsed = box.getAttribute('data-collapsed') !== '0';
+        const willOpen = wasCollapsed;
+        box.setAttribute('data-collapsed', willOpen ? '0' : '1');
+        if (body) body.hidden = !willOpen;
+    });
+
+    // v0.5.18 内置「通用折叠」开关
+    const builtinChk = host.querySelector('#' + px + '_cre_builtin');
+    if (builtinChk) builtinChk.onchange = () => {
+        const c = JSON.parse(JSON.stringify(loadSettings()));
+        c.customRegex = { ...DEFAULT_CUSTOM_REGEX, ...(c.customRegex || {}), builtinFold: builtinChk.checked };
+        saveSettings(c);
+        repaint();
+    };
 
     // —— 自定义对列表渲染 + 输入处理（修好的：oninput 只保存，onblur 才 repaint）——
     const renderList = (listId, addBtnId, path, isStrip) => {
@@ -2256,6 +2393,207 @@ function mountRulesEditor(host, opts) {
     renderList(`${px}_us_list`, `${px}_us_add`, [...userPath, 'strip'],   true);
     renderList(`${px}_ue_list`, `${px}_ue_add`, [...userPath, 'extract'], false);
 
+    // —— v0.5.17 自定义正则：列表渲染 + 创建 + 上传 ——
+    const mutateCRE = (mut) => {
+        const c = JSON.parse(JSON.stringify(loadSettings()));
+        const cur = { items: [], ...(c.customRegex || {}) };
+        cur.items = Array.isArray(cur.items) ? cur.items.slice() : [];
+        mut(cur);
+        c.customRegex = cur;
+        saveSettings(c);
+    };
+    const validRegex = (p, f) => { try { new RegExp(p, f || 'g'); return true; } catch { return false; } };
+    // 解析酒馆正则 JSON（单条对象）→ 我们的简化结构；忽略 placement/depth/macros 等
+    function parseSillyTavernRegex(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        const findRegex = typeof raw.findRegex === 'string' ? raw.findRegex : '';
+        if (!findRegex) return null;
+        // 形如 "/pattern/flags" → 拆出 pattern + flags（兼容裸 pattern）
+        let pattern = findRegex, flags = 'g';
+        const m = /^\/((?:\\.|[^\\\/])+)\/([gimsuy]*)$/.exec(findRegex);
+        if (m) { pattern = m[1]; flags = m[2] || 'g'; }
+        const replace = typeof raw.replaceString === 'string' ? raw.replaceString : '';
+        const name = typeof raw.scriptName === 'string' ? raw.scriptName : '';
+        // placement: 1=user input, 2=AI output；其他（slash/world/reasoning）我们不支持
+        const placement = Array.isArray(raw.placement) ? raw.placement : [];
+        const hasUser = placement.includes(1);
+        const hasAI   = placement.includes(2);
+        let target = 'both';
+        if (hasUser && !hasAI) target = 'user';
+        else if (hasAI && !hasUser) target = 'ai';
+        let enabled = !raw.disabled;
+        const suspectMacro = /\{\{[^}]+\}\}/.test(replace);
+        if (suspectMacro) enabled = false;
+        if (placement.length && !hasUser && !hasAI) enabled = false;
+        let nm = name;
+        if (suspectMacro) nm = '⚠ ' + (name || '含酒馆宏');
+        else if (placement.length && !hasUser && !hasAI) nm = '⚠ ' + (name || '原仅作用于不支持的范围');
+        return { name: nm, pattern, flags, replace, target, enabled };
+    }
+    // v0.5.18: 把 pattern + flags 合并成一个 /pattern/flags 输入框（与酒馆习惯一致）
+    // 解析：以 / 开头 → 严格匹配 /…/flags；否则按裸 pattern 处理（兜底，flags=g）
+    const parseCombined = (s) => {
+        const t = (s || '').trim();
+        if (!t) return { pattern: '', flags: 'g', ok: false };
+        if (t.startsWith('/')) {
+            const m = /^\/((?:\\.|[^\\\/])+)\/([gimsuy]*)$/.exec(t);
+            if (m) return { pattern: m[1], flags: m[2] || 'g', ok: true };
+            return { pattern: t, flags: 'g', ok: false };  // 形似 /…/ 但拆不出来 → 标错
+        }
+        return { pattern: t, flags: 'g', ok: true };       // 裸 pattern
+    };
+    const combineDisplay = (it) => {
+        const p = it.pattern || ''; const f = it.flags || 'g';
+        return p ? `/${p}/${f}` : '';
+    };
+    const renderCRE = () => {
+        const list = host.querySelector('#' + px + '_cre_list');
+        if (!list) return;
+        const cur = ((loadSettings().customRegex) || {}).items || [];
+        if (!cur.length) { list.innerHTML = '<div class="cv-field-hint">（暂无）</div>'; return; }
+        list.innerHTML = cur.map((it, i) => {
+            const enabled = it.enabled !== false;
+            const valid = validRegex(it.pattern || '', it.flags || 'g');
+            const labelText = it.name || combineDisplay(it) || '(未命名)';
+            const tgt = it.target === 'user' ? 'user' : it.target === 'ai' ? 'AI' : '全部';
+            return `
+            <div class="cv-cre-row" data-i="${i}" data-collapsed="1">
+                <div class="cv-cre-head">
+                    <label class="cv-switch cv-cre-en" title="启用">
+                        <input type="checkbox" class="cv-cre-en-i" ${enabled?'checked':''}/>
+                        <span class="cv-switch-track"><span class="cv-switch-thumb"></span></span>
+                    </label>
+                    <span class="cv-cre-name ${valid?'':'is-bad'}">${escapeHtml(labelText)}</span>
+                    <span class="cv-cre-tgt">${tgt}</span>
+                    <button class="cv-cre-toggle" type="button" title="展开/收起">▾</button>
+                    <button class="cv-strip-del cv-cre-del" type="button" title="删除">×</button>
+                </div>
+                <div class="cv-cre-body-row" hidden>
+                    <label class="cv-cre-label">名称<input type="text" class="cv-cre-fname" placeholder="（可选）" value="${escapeHtml(it.name || '')}"/></label>
+                    <label class="cv-cre-label">查找正则<input type="text" class="cv-cre-fcombined" placeholder="/pattern/flags（与酒馆格式一致）" value="${escapeHtml(combineDisplay(it))}"/></label>
+                    <label class="cv-cre-label">替换为<input type="text" class="cv-cre-frep" placeholder="留空 = 删除" value="${escapeHtml(it.replace || '')}"/></label>
+                    <div class="cv-cre-target">
+                        <span class="cv-cre-label-inline">作用对象</span>
+                        <label><input type="radio" name="${px}_cre_t_${i}" value="both" ${(!it.target||it.target==='both')?'checked':''}/> 全部</label>
+                        <label><input type="radio" name="${px}_cre_t_${i}" value="user" ${it.target==='user'?'checked':''}/> 仅 user</label>
+                        <label><input type="radio" name="${px}_cre_t_${i}" value="ai" ${it.target==='ai'?'checked':''}/> 仅 AI</label>
+                    </div>
+                    <div class="cv-cre-err" ${valid?'hidden':''}>正则语法错误，已跳过此条</div>
+                </div>
+            </div>`;
+        }).join('');
+        list.querySelectorAll('.cv-cre-row').forEach(row => {
+            const i = Number(row.dataset.i);
+            const head = row.querySelector('.cv-cre-head');
+            const body = row.querySelector('.cv-cre-body-row');
+            const tog  = row.querySelector('.cv-cre-toggle');
+            const expand = (open) => {
+                row.dataset.collapsed = open ? '0' : '1';
+                body.hidden = !open;
+                tog.textContent = open ? '▴' : '▾';
+            };
+            head.addEventListener('click', (e) => {
+                if (e.target.closest('.cv-cre-en, .cv-cre-del, input, label')) return;
+                expand(row.dataset.collapsed !== '0');
+            });
+            tog.onclick = (e) => { e.stopPropagation(); expand(row.dataset.collapsed !== '0'); };
+            // 启用开关
+            const enInp = row.querySelector('.cv-cre-en-i');
+            enInp.onchange = () => { mutateCRE(c => { if (c.items[i]) c.items[i].enabled = enInp.checked; }); repaint(); };
+            // 字段：oninput 只存、blur 才 repaint（避免输入时父节点重渲毁焦/中文输入法关闭）
+            const nm = row.querySelector('.cv-cre-fname');
+            const cb = row.querySelector('.cv-cre-fcombined');
+            const rp = row.querySelector('.cv-cre-frep');
+            const errEl = row.querySelector('.cv-cre-err');
+            const saveOnly = () => mutateCRE(c => {
+                if (!c.items[i]) return;
+                const parsed = parseCombined(cb.value);
+                c.items[i] = { ...c.items[i], name: nm.value, pattern: parsed.pattern, flags: parsed.flags, replace: rp.value };
+            });
+            const refreshErr = () => {
+                const parsed = parseCombined(cb.value);
+                const ok = parsed.ok && validRegex(parsed.pattern, parsed.flags);
+                errEl.hidden = ok;
+                cb.classList.toggle('is-bad', !ok && cb.value.trim() !== '');
+            };
+            let focusVal = '';
+            [nm, cb, rp].forEach(el => {
+                el.oninput = () => { saveOnly(); if (el === cb) refreshErr(); };
+                el.onfocus = () => { focusVal = el.value; };
+                el.onblur  = () => { if (el.value !== focusVal) setTimeout(repaint, 0); };
+            });
+            // 作用对象
+            row.querySelectorAll(`input[name="${px}_cre_t_${i}"]`).forEach(r => {
+                r.onchange = () => {
+                    if (!r.checked) return;
+                    mutateCRE(c => { if (c.items[i]) c.items[i].target = r.value; });
+                    repaint();
+                };
+            });
+            // 删除
+            row.querySelector('.cv-cre-del').onclick = (e) => {
+                e.stopPropagation();
+                mutateCRE(c => { c.items = c.items.filter((_, k) => k !== i); });
+                renderCRE(); repaint();
+            };
+        });
+    };
+    renderCRE();
+    // 折叠由 host 顶层的 cv-fold-toggle 委托 handler 统一处理（v0.5.18）
+    const creBox = host.querySelector('.cv-cre-box');
+    const creBody = creBox && creBox.querySelector(':scope > .cv-fold-body');
+    const expandCREBox = () => {
+        if (!creBox) return;
+        creBox.setAttribute('data-collapsed', '0');
+        if (creBody) creBody.hidden = false;
+    };
+    // + 创建
+    const creAddBtn = host.querySelector('#' + px + '_cre_add');
+    if (creAddBtn) creAddBtn.onclick = () => {
+        mutateCRE(c => { c.items = [...c.items, { name:'', pattern:'', flags:'g', replace:'', target:'both', enabled:true }]; });
+        expandCREBox();
+        renderCRE();
+        // 自动展开新行 + 聚焦输入框
+        const rows = host.querySelectorAll('.cv-cre-row');
+        const lastRow = rows[rows.length - 1];
+        if (lastRow) {
+            lastRow.dataset.collapsed = '0';
+            const lb = lastRow.querySelector('.cv-cre-body-row');
+            if (lb) lb.hidden = false;
+            const ltog = lastRow.querySelector('.cv-cre-toggle'); if (ltog) ltog.textContent = '▴';
+            const ip = lastRow.querySelector('.cv-cre-fcombined'); if (ip) ip.focus();
+        }
+    };
+    // ↑ 上传 JSON（接受单条 / 数组 / 多文件）
+    const upBtn = host.querySelector('#' + px + '_cre_upload_btn');
+    const upInp = host.querySelector('#' + px + '_cre_upload');
+    if (upBtn && upInp) {
+        upBtn.onclick = () => upInp.click();
+        upInp.onchange = async () => {
+            const files = Array.from(upInp.files || []);
+            upInp.value = '';
+            if (!files.length) return;
+            const parsed = []; const skipped = [];
+            for (const f of files) {
+                try {
+                    const data = JSON.parse(await f.text());
+                    const arr = Array.isArray(data) ? data : [data];
+                    for (const r of arr) {
+                        const mapped = parseSillyTavernRegex(r);
+                        if (mapped) parsed.push(mapped); else skipped.push(f.name);
+                    }
+                } catch { skipped.push(f.name + '（解析失败）'); }
+            }
+            if (parsed.length) {
+                mutateCRE(c => { c.items = [...c.items, ...parsed]; });
+                expandCREBox();
+                renderCRE(); repaint();
+            }
+            const msg = `导入 ${parsed.length} 条` + (skipped.length ? `；跳过 ${skipped.length} 处：${[...new Set(skipped)].slice(0,3).join(', ')}` : '');
+            try { toastr.info(msg); } catch { setStatus(msg); }
+        };
+    }
+
     // —— 开关组 ——
     const flagMap = [
         [`${px}_s_thinking`,    stripPath,                'thinking',    true],
@@ -2278,23 +2616,9 @@ function mountRulesEditor(host, opts) {
         };
     });
 
-    // user 总开关
-    const userToggle = host.querySelector('#' + px + '_u_enabled');
-    if (userToggle) userToggle.onchange = () => {
-        const c = JSON.parse(JSON.stringify(loadSettings()));
-        const cur = { ...DEFAULT_USER_RULES, ...(getAt(c, userPath) || {}) };
-        cur.enabled = userToggle.checked;
-        setAt(c, userPath, cur);
-        saveSettings(c);
-        const body = host.querySelector('.cv-user-rules-body');
-        if (body) body.hidden = !userToggle.checked;
-        repaint();
-    };
+    // v0.5.19: user 独立规则总开关已删除 —— 折叠状态本身即启用状态（见委托 handler）
 
-    // 提取说明气泡
-    const eInfo = host.querySelector('#' + px + '_e_info');
-    const eTip  = host.querySelector('#' + px + '_e_info_tip');
-    if (eInfo && eTip) eInfo.onclick = () => { eTip.hidden = !eTip.hidden; };
+    // v0.5.20: 提取说明已平铺为常驻 .cv-info-tip，无需 toggle handler
 }
 
 function renderReaderSettings(panel) {
@@ -2322,7 +2646,6 @@ function renderReaderSettings(panel) {
                 <span class="cv-switch-track"><span class="cv-switch-thumb"></span></span>
             </span>
         </label>`;
-    const curTheme = THEMES.some(t => t.id === cfg.theme) ? cfg.theme : 'dark';
     const curPager = cfg.readerPagerMode === 'always' ? 'always' : 'autoHide';
     panel.innerHTML = `
         <div class="cv-reader-settings-header">
@@ -2421,17 +2744,6 @@ function renderReaderSettings(panel) {
                 </div>
             </div>
             <div class="cv-strip-box">
-                <div class="cv-strip-title">配色方案</div>
-                <div class="cv-reader-style-row">
-                    ${THEMES.map(t => `
-                        <label class="cv-reader-style-opt ${curTheme===t.id?'is-on':''}">
-                            <input type="radio" name="cv_r_theme" value="${t.id}" ${curTheme===t.id?'checked':''}/>
-                            <span class="cv-reader-style-name">${escapeHtml(t.name)}</span>
-                        </label>
-                    `).join('')}
-                </div>
-            </div>
-            <div class="cv-strip-box">
                 <div class="cv-strip-title">
                     user 头像（仅本聊天）
                     <button class="cv-info-btn" type="button" id="cv_r_ua_info" title="点击查看说明">!</button>
@@ -2468,18 +2780,8 @@ function renderReaderSettings(panel) {
         </div>
     `;
 
-    panel.querySelectorAll('input[name="cv_r_theme"]').forEach(r => {
-        r.onchange = () => {
-            if (!r.checked) return;
-            const c = loadSettings();
-            saveSettings({ ...c, theme: r.value });
-            const root = document.getElementById('chatvault_panel');
-            if (root) root.className = currentThemeClass() + (readerState.active ? ' cv-in-reader' : '');
-            panel.querySelectorAll('input[name="cv_r_theme"]').forEach(x => {
-                x.closest('.cv-reader-style-opt')?.classList.toggle('is-on', x.checked);
-            });
-        };
-    });
+    // v0.5.26: 阅读模式的"配色方案"块已删除——它本就只改 chatvault_panel 自身样式，
+    //           跟主面板设置完全重复。配色统一在主设置面板里改。
     panel.querySelectorAll('input[name="cv_r_pager"]').forEach(r => {
         r.onchange = () => {
             if (!r.checked) return;
@@ -2737,13 +3039,14 @@ async function exportChatTxt(character, fileName) {
             const m = arr[i];
             if (!m || typeof m.mes !== 'string') continue;
             const isUser = !!m.is_user;
-            const useUser = u.enabled && isUser;
+            // v0.5.25: 与阅读模式一致——enabled 字段废弃，user 消息一律走 user-rules
+            const useUser = isUser;
             const s = useUser ? ustrip   : strip;
             const e = useUser ? uextract : extract;
             const who = isUser
                 ? (m.name && m.name !== 'unused' ? m.name : userName)
                 : (m.name || charName);
-            const cleaned = processMessageText(m.mes, s, e);
+            const cleaned = processMessageText(m.mes, s, e, cfg.customRegex, isUser);
             if (!cleaned) continue;
             lines.push(`【${who}】`);
             lines.push(cleaned);
@@ -3007,13 +3310,15 @@ function openRulesModal() {
     document.getElementById('chatvault_panel').appendChild(wrap);
     document.getElementById('cv_rules_close').onclick = closeModal;
     document.getElementById('cv_rules_done').onclick = closeModal;
-    // 独立 modal：repaint 留空，规则改动不会触发任何外部 DOM 重渲染
+    // v0.5.17: repaint 改为真重渲染 —— 自定义正则等改动需要立刻反映到主列表/阅读器
+    // render() 内部判断：阅读模式走 renderReader（cfgSig 变了重算），主列表重画卡片
+    // modal 在 chatvault_panel 子节点而非 cv_body，render 不会误关 modal
     mountRulesEditor(document.getElementById('cv_rules_holder'), {
         prefix: 'cv_rules',
         stripPath: ['strip'],
         extractPath: ['extract'],
         userPath: ['userRules'],
-        repaint: () => {},
+        repaint: () => render(),
     });
 }
 
