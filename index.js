@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.3';
+const VERSION = '0.5.8';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -78,11 +78,16 @@ const DEFAULT_SETTINGS = {
     // 自定义配色（v0.3.32 起；只覆盖填了的字段，其它跟随主题）
     // 形如 { accent:'#34d399', bgPanel:'#212327', bgCard:'#2a2d32', text:'#e4e5e7', overlayAlpha:0.55 }
     customColors: {},
-    // 桌面窗口模式（v0.3.27 起，仅桌面端生效，手机端完全跳过）
+    // 桌面窗口模式（仅桌面端生效，手机端完全跳过）
+    desktopPanelMode: 'modal',         // 'modal' | 'dock'：经典居中弹窗 / 左侧停靠栏
+    desktopCardLayout: 'auto',         // 'auto' | 'narrow' | 'wide'：按面板宽度自动单/双列，或强制指定
+    readerExpandMode: 'auto',          // 'auto' | 'off'：阅读模式是否临时展开大屏
+    leftDockButton: true,              // 左侧边缘 ChatVault 快捷入口
+    dockTabTop: 0.34,                  // 左侧快捷入口纵向位置（0~1，按视口高度记忆）
     windowFreeMode: false,             // 自由模式：去掉遮罩，可同时操作酒馆
     windowHotkey: false,               // 是否启用全局快捷键开关面板
     windowHotkeyCombo: 'Alt+V',        // 快捷键组合
-    windowState: null,                 // 记忆位置：{ x, y, scale }
+    windowState: null,                 // 记忆位置/尺寸：{ x, y, w, h, layout, mode }；兼容旧 { x, y, scale }
     // 是否在酒馆欢迎页底部追加「聊天档案」快捷按钮（与 API 连接/角色管理/扩展程序 同排）
     welcomeButton: true,
     // v0.5.14 阅读模式增强渲染开关（表格/代码块/列表/引用/AI 内联 HTML 如 <img> <p style>）
@@ -132,6 +137,11 @@ function saveSettings(s) {
 function currentThemeClass() {
     const id = loadSettings().theme;
     return THEMES.some(t => t.id === id) ? `cv-theme-${id}` : 'cv-theme-dark';
+}
+function applyThemeClass(el) {
+    if (!el) return;
+    THEMES.forEach(t => el.classList.remove(`cv-theme-${t.id}`));
+    el.classList.add(currentThemeClass());
 }
 
 /* ============================================================
@@ -230,6 +240,8 @@ function removeBookmark(avatar, fileName, idx) {
  * ============================================================ */
 
 let _getReqHeaders = null;
+let _showMoreMessages = null;
+let _getFirstDisplayedMessageId = null;
 const _headersReady = (async () => {
     try {
         const mod = await import('../../../../script.js');
@@ -237,6 +249,8 @@ const _headersReady = (async () => {
             _getReqHeaders = mod.getRequestHeaders;
             console.log('[ChatVault] getRequestHeaders 已通过 ESM import 加载');
         }
+        if (typeof mod.showMoreMessages === 'function') _showMoreMessages = mod.showMoreMessages;
+        if (typeof mod.getFirstDisplayedMessageId === 'function') _getFirstDisplayedMessageId = mod.getFirstDisplayedMessageId;
     } catch (e) {
         console.warn('[ChatVault] 动态 import script.js 失败，将使用 cookie fallback:', e.message);
     }
@@ -345,6 +359,9 @@ async function deleteChat(avatar, fileName) {
 const previewCache = new Map();
 const PREVIEW_CACHE_MAX = 500;        // 软上限，超出按插入序裁掉最早 10%
 const PREVIEW_FAIL_TTL  = 10 * 60_000; // 失败 10 分钟后允许重试
+const PREVIEW_SNIPPET_MAX = 160;
+const PREVIEW_TIP_TOUCH_DELAY = 900;
+const PREVIEW_TIP_TOUCH_MOVE = 10;
 
 function previewCacheGet(key) {
     if (!previewCache.has(key)) return { hit: false };
@@ -371,6 +388,68 @@ function previewCacheSet(key, value) {
 }
 function previewCacheMarkFail(key) {
     previewCacheSet(key, { __cvFail: Date.now() });
+}
+
+function cleanPreviewText(text) {
+    return String(text ?? '')
+        .replace(/<thinking[^>]*>[\s\S]*?<\/thinking>/gi, '')
+        .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/[*_`~]+/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function cleanFullPreviewText(text) {
+    return String(text ?? '')
+        .replace(/[*_`~]+/g, '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/[ \t\f\v]+/g, ' ')
+        .replace(/ *\n */g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+function findPreviewSnippetStart(text, target) {
+    const radius = 80;
+    const min = Math.max(0, target - radius);
+    const max = Math.min(text.length - 1, target + radius);
+    let best = -1;
+    const punct = '。！？!?；;，,、：:\n\r';
+    for (let i = target; i >= min; i--) {
+        if (punct.includes(text[i])) { best = i + 1; break; }
+    }
+    if (best < 0) {
+        for (let i = target + 1; i <= max; i++) {
+            if (punct.includes(text[i])) { best = i + 1; break; }
+        }
+    }
+    if (best < 0) best = target;
+    while (best < text.length && /\s/.test(text[best])) best++;
+    return Math.min(best, Math.max(0, text.length - 1));
+}
+
+function makePreviewSnippet(text, maxLen = PREVIEW_SNIPPET_MAX) {
+    const clean = cleanPreviewText(text);
+    if (!clean || clean.length <= maxLen) return clean;
+    const start = findPreviewSnippetStart(clean, Math.floor(clean.length * 0.58));
+    const end = Math.min(clean.length, start + maxLen);
+    const segment = clean.slice(start, end).trim();
+    return `...${segment}${end < clean.length ? '...' : ''}`;
+}
+
+function renderPreviewText(el, text) {
+    el.classList.remove('is-loading', 'is-empty');
+    el.innerHTML = '';
+    if (text === null) {
+        el.classList.add('is-empty');
+        el.textContent = '（无法加载预览）';
+    } else if (!text) {
+        el.classList.add('is-empty');
+        el.textContent = '（空聊天）';
+    } else {
+        el.textContent = makePreviewSnippet(text);
+    }
 }
 
 async function fetchLastMessageText(character, fileName) {
@@ -494,7 +573,79 @@ async function newChatFor(character) {
     }
 }
 
-async function jumpToChat(character, fileName) {
+function findRealChatMessageEl(idx) {
+    const chat = document.getElementById('chat') || document;
+    const selectors = [
+        `.mes[mesid="${idx}"]`,
+        `.mes[data-mesid="${idx}"]`,
+        `.mes[data-index="${idx}"]`,
+        `.mes[data-idx="${idx}"]`,
+        `.mes[data-message-id="${idx}"]`,
+    ];
+    for (const sel of selectors) {
+        const el = chat.querySelector(sel) || document.querySelector(sel);
+        if (el) return el;
+    }
+    const all = Array.from(chat.querySelectorAll('.mes'));
+    return all.find(el => Number(el.getAttribute('mesid')) === idx
+        || Number(el.dataset?.mesid) === idx
+        || Number(el.dataset?.index) === idx
+        || Number(el.dataset?.idx) === idx
+        || Number(el.dataset?.messageId) === idx) || null;
+}
+
+function getFirstRealDisplayedMessageId() {
+    try {
+        if (typeof _getFirstDisplayedMessageId === 'function') {
+            const id = Number(_getFirstDisplayedMessageId());
+            if (Number.isFinite(id)) return id;
+        }
+    } catch {}
+    const ids = Array.from(document.querySelectorAll('#chat .mes'))
+        .map(el => Number(el.getAttribute('mesid')))
+        .filter(Number.isFinite);
+    return ids.length ? Math.min(...ids) : null;
+}
+
+async function ensureRealChatFloorRendered(idx) {
+    const chatReady = await waitFor(() => {
+        try {
+            const chat = SillyTavern.getContext()?.chat;
+            return Array.isArray(chat) && chat.length > idx;
+        } catch { return false; }
+    }, 10000, 80);
+    if (!chatReady) return false;
+
+    if (findRealChatMessageEl(idx)) return true;
+    let firstDisplayed = getFirstRealDisplayedMessageId();
+    if (firstDisplayed !== null && idx < firstDisplayed && typeof _showMoreMessages === 'function') {
+        try {
+            await _showMoreMessages(firstDisplayed - idx);
+            await waitFor(() => {
+                firstDisplayed = getFirstRealDisplayedMessageId();
+                return firstDisplayed !== null && firstDisplayed <= idx;
+            }, 6000, 80);
+        } catch (e) {
+            console.warn('[ChatVault] 加载更早消息失败，降级为不定位楼层', e);
+            return false;
+        }
+    }
+    return !!findRealChatMessageEl(idx);
+}
+
+async function scrollRealChatToFloor(idx) {
+    const ok = await ensureRealChatFloorRendered(idx);
+    const el = ok ? findRealChatMessageEl(idx) : null;
+    if (!el) {
+        toastr.warning(`已打开聊天，但暂时没定位到 #${idx} 楼，请稍后手动滚动`);
+        return;
+    }
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.add('cv-st-jump-highlight');
+    setTimeout(() => el.classList.remove('cv-st-jump-highlight'), 1800);
+}
+
+async function jumpToChat(character, fileName, opts = {}) {
     try {
         const ctx = SillyTavern.getContext();
         const candidates = ctx.characters
@@ -527,6 +678,7 @@ async function jumpToChat(character, fileName) {
         } else {
             toastr.warning('已切换角色，但当前 ST 版本无法直接打开指定聊天，请手动选择');
         }
+        if (Number.isInteger(opts.floorIdx)) await scrollRealChatToFloor(opts.floorIdx);
     } catch (e) {
         console.error('[ChatVault] 跳转失败', e);
         toastr.error(`跳转失败: ${e.message}`);
@@ -547,6 +699,10 @@ let activeTab = 'recent';        // 'recent' | 'characters' | 'favorites' | 'cur
 let currentPage = 1;             // 当前 tab 内的分页
 let searchQuery = '';
 let previewObserver = null;
+let paginationScrollState = null;
+let previewTipTouchTimer = null;
+let previewTipTouchStart = null;
+let previewTipSuppressClick = false;
 
 /* ============================================================
  *  HTML 工具
@@ -650,8 +806,12 @@ const ICONS = {
  *  UI 顶层
  * ============================================================ */
 
-function openPanel() {
-    if (panelEl) return;
+function openPanel(modeOverride = '') {
+    if (panelEl) {
+        const panel = document.getElementById('chatvault_panel');
+        if (modeOverride && panel && !panel.classList.contains('cv-in-reader')) applyWindowState(panelEl, panel, modeOverride);
+        return;
+    }
     panelEl = document.createElement('div');
     panelEl.id = 'chatvault_overlay';
     panelEl.className = currentThemeClass();
@@ -693,7 +853,7 @@ function openPanel() {
 
     // 桌面窗口模式：装把手、还原位置、绑定拖拽/拉伸（手机端内部直接 return）
     const _panel = document.getElementById('chatvault_panel');
-    applyWindowState(panelEl, _panel);
+    applyWindowState(panelEl, _panel, modeOverride);
     initWindowChrome(panelEl, _panel);
 
     document.getElementById('cv_close').onclick = closePanel;
@@ -714,6 +874,7 @@ function openPanel() {
         if (!btn) return;
         switchTab(btn.dataset.tab);
     });
+    bindPaginationAutoHide();
 
     document.addEventListener('keydown', escHandler);
 
@@ -741,6 +902,8 @@ function markSnapshot(isSnapshot) {
 
 function escHandler(e) {
     if (e.key !== 'Escape') return;
+    const tip = document.getElementById('cv_preview_tip');
+    if (tip) { closePreviewTip(); return; }
     // 如果有打开的 modal 先关 modal
     const modal = document.getElementById('cv_modal');
     if (modal) { modal.remove(); return; }
@@ -748,6 +911,7 @@ function escHandler(e) {
 }
 
 function closePanel() {
+    closePreviewTip();
     // 阅读模式楼层菜单可能还开着；它在 document 上挂了 mousedown/touchstart capture 监听
     // 不显式 close 会导致这两个监听器残留 + 闭包持有已 detach 的菜单节点
     closeMsgMenu();
@@ -783,6 +947,58 @@ function switchTab(tab) {
 function setStatus(text) {
     const el = document.getElementById('cv_status');
     if (el) el.textContent = text || '';
+}
+
+function shouldAutoHidePagination() {
+    const panel = document.getElementById('chatvault_panel');
+    return isMobileLayout() || !!panel?.classList.contains('cv-layout-narrow');
+}
+
+function resetPaginationAutoHide() {
+    const pagination = document.getElementById('cv_pagination');
+    if (pagination) pagination.classList.remove('is-hidden');
+    if (paginationScrollState) {
+        paginationScrollState.lastY = document.getElementById('cv_body')?.scrollTop || 0;
+        paginationScrollState.acc = 0;
+    }
+}
+
+function updatePaginationAutoHideMode() {
+    const pagination = document.getElementById('cv_pagination');
+    if (!pagination) return;
+    const enabled = shouldAutoHidePagination();
+    pagination.classList.toggle('cv-pagination-autohide', enabled);
+    if (!enabled) pagination.classList.remove('is-hidden');
+}
+
+function bindPaginationAutoHide() {
+    const body = document.getElementById('cv_body');
+    const pagination = document.getElementById('cv_pagination');
+    if (!body || !pagination || body._cvPaginationAutoHideBound) return;
+    body._cvPaginationAutoHideBound = true;
+    paginationScrollState = { lastY: body.scrollTop || 0, acc: 0 };
+    body.addEventListener('scroll', () => {
+        if (!shouldAutoHidePagination()) {
+            pagination.classList.remove('is-hidden');
+            paginationScrollState.lastY = body.scrollTop;
+            paginationScrollState.acc = 0;
+            return;
+        }
+        const y = body.scrollTop;
+        const dy = y - paginationScrollState.lastY;
+        paginationScrollState.lastY = y;
+        if (Math.abs(dy) < 2) return;
+        paginationScrollState.acc = (Math.sign(dy) === Math.sign(paginationScrollState.acc)) ? paginationScrollState.acc + dy : dy;
+        if (paginationScrollState.acc > 24) {
+            pagination.classList.add('is-hidden');
+            paginationScrollState.acc = 0;
+        } else if (paginationScrollState.acc < -24) {
+            pagination.classList.remove('is-hidden');
+            paginationScrollState.acc = 0;
+        }
+        if (body.scrollHeight - y - body.clientHeight < 80) pagination.classList.remove('is-hidden');
+        if (y < 40) pagination.classList.remove('is-hidden');
+    }, { passive: true });
 }
 
 /* ============================================================
@@ -1179,7 +1395,7 @@ function renderCard(character, chat, hideCharName = false) {
                     ${meta1}
                     ${tagsHtml}
                 </div>
-                <div class="cv-preview is-loading" data-preview="1">加载预览中…</div>
+                <div class="cv-preview is-loading" data-preview="1" aria-label="右键或长按查看完整预览">加载预览中…</div>
                 <div class="cv-fold">
                     <button class="cv-fold-btn cv-fold-primary" data-act="reader" type="button">${ICONS.book}<span>阅读模式</span></button>
                     <button class="cv-fold-btn" data-act="rules" type="button">${ICONS.gear}<span>摘取规则</span></button>
@@ -1193,12 +1409,14 @@ function renderCard(character, chat, hideCharName = false) {
 function renderPagination(total, totalPages) {
     const el = document.getElementById('cv_pagination');
     if (!el) return;
+    resetPaginationAutoHide();
+    updatePaginationAutoHideMode();
     if (total === 0) {
         el.innerHTML = '';
         return;
     }
     el.innerHTML = `
-        <span>第 ${currentPage} / ${totalPages} 页</span>
+        <span class="cv-page-label">第 ${currentPage} / ${totalPages} 页</span>
         <button class="cv-page-btn" id="cv_prev" ${currentPage <= 1 ? 'disabled' : ''}>${ICONS.chevL}</button>
         <button class="cv-page-btn" id="cv_next" ${currentPage >= totalPages ? 'disabled' : ''}>${ICONS.chevR}</button>
     `;
@@ -1240,6 +1458,8 @@ function bindCardEvents() {
             };
         });
 
+        bindPreviewTipEvents(card, character, fileName);
+
         // 折叠区按钮
         card.querySelectorAll('.cv-fold-btn').forEach(btn => {
             btn.onclick = (e) => {
@@ -1269,6 +1489,142 @@ function bindCardEvents() {
     if (active) active.classList.add('is-folded-open');
 }
 
+function clearPreviewTipTimers() {
+    if (previewTipTouchTimer) { clearTimeout(previewTipTouchTimer); previewTipTouchTimer = null; }
+    previewTipTouchStart = null;
+}
+
+function closePreviewTip() {
+    clearPreviewTipTimers();
+    const tip = document.getElementById('cv_preview_tip');
+    if (tip) {
+        try { tip._cleanup && tip._cleanup(); } catch {}
+        tip.remove();
+    }
+}
+
+function positionPreviewTip(tip, anchorEl) {
+    const anchor = anchorEl.getBoundingClientRect();
+    const rect = tip.getBoundingClientRect();
+    const vw = window.innerWidth || document.documentElement.clientWidth || 1;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 1;
+    const margin = 10;
+    let left = anchor.left;
+    let top = anchor.bottom + 8;
+    if (top + rect.height > vh - margin) {
+        const above = anchor.top - rect.height - 8;
+        top = above >= margin ? above : Math.max(margin, vh - rect.height - margin);
+    }
+    if (left + rect.width > vw - margin) left = vw - rect.width - margin;
+    left = _clamp(left, margin, Math.max(margin, vw - rect.width - margin));
+    top = _clamp(top, margin, Math.max(margin, vh - rect.height - margin));
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+}
+
+function openTextPreviewTip(anchorEl, text, emptyText = '（空消息）') {
+    closePreviewTip();
+    if (!anchorEl?.isConnected) return;
+
+    const tip = document.createElement('div');
+    tip.className = 'cv-preview-tip';
+    tip.id = 'cv_preview_tip';
+    tip.textContent = text === null ? emptyText : (cleanFullPreviewText(text) || emptyText);
+    (document.getElementById('chatvault_panel') || document.body).appendChild(tip);
+    positionPreviewTip(tip, anchorEl);
+
+    const onDocDown = (ev) => {
+        if (tip.contains(ev.target)) return;
+        if (anchorEl.contains(ev.target)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+        }
+        closePreviewTip();
+    };
+    const onScroll = (ev) => {
+        if (tip.contains(ev.target)) return;
+        closePreviewTip();
+    };
+    const onKey = (ev) => {
+        if (ev.key === 'Escape') closePreviewTip();
+    };
+    const onClose = () => closePreviewTip();
+    setTimeout(() => {
+        if (!tip.isConnected) return;
+        document.addEventListener('mousedown', onDocDown, true);
+        document.addEventListener('touchstart', onDocDown, true);
+        document.addEventListener('keydown', onKey, true);
+        document.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onClose, true);
+        tip._cleanup = () => {
+            document.removeEventListener('mousedown', onDocDown, true);
+            document.removeEventListener('touchstart', onDocDown, true);
+            document.removeEventListener('keydown', onKey, true);
+            document.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', onClose, true);
+        };
+    }, 0);
+}
+
+async function openPreviewTip(card, anchorEl, character, fileName) {
+    closePreviewTip();
+    if (!card?.isConnected || !anchorEl?.isConnected || !character || !fileName) return;
+    const key = metaKey(character.avatar, fileName);
+    const cached = previewCacheGet(key);
+    const text = cached.hit ? cached.value : await fetchLastMessageText(character, fileName);
+    if (!card.isConnected || !anchorEl.isConnected) return;
+    openTextPreviewTip(anchorEl, text, text === null ? '（无法加载预览）' : '（空聊天）');
+}
+
+function bindTextPreviewTipEvents(anchorEl, openTip) {
+    if (!anchorEl || anchorEl._cvTextPreviewTipBound) return;
+    anchorEl._cvTextPreviewTipBound = true;
+
+    anchorEl.addEventListener('click', e => {
+        if (!previewTipSuppressClick) return;
+        previewTipSuppressClick = false;
+        e.preventDefault();
+        e.stopPropagation();
+    });
+    anchorEl.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        openTip();
+    });
+    anchorEl.addEventListener('pointerdown', e => {
+        if (e.pointerType !== 'touch') return;
+        clearPreviewTipTimers();
+        previewTipTouchStart = { x: e.clientX, y: e.clientY };
+        previewTipTouchTimer = setTimeout(() => {
+            previewTipTouchTimer = null;
+            previewTipTouchStart = null;
+            previewTipSuppressClick = true;
+            setTimeout(() => { previewTipSuppressClick = false; }, 500);
+            e.preventDefault();
+            openTip();
+        }, PREVIEW_TIP_TOUCH_DELAY);
+    });
+    anchorEl.addEventListener('pointermove', e => {
+        if (!previewTipTouchStart || e.pointerType !== 'touch') return;
+        const dx = e.clientX - previewTipTouchStart.x;
+        const dy = e.clientY - previewTipTouchStart.y;
+        if (Math.hypot(dx, dy) > PREVIEW_TIP_TOUCH_MOVE) clearPreviewTipTimers();
+    });
+    anchorEl.addEventListener('pointerup', e => {
+        if (e.pointerType === 'touch' && previewTipTouchTimer) clearPreviewTipTimers();
+    });
+    anchorEl.addEventListener('pointercancel', e => {
+        if (e.pointerType === 'touch') clearPreviewTipTimers();
+    });
+}
+
+function bindPreviewTipEvents(card, character, fileName) {
+    const preview = card.querySelector('.cv-preview');
+    if (!preview || preview._cvPreviewTipBound) return;
+    preview._cvPreviewTipBound = true;
+    bindTextPreviewTipEvents(preview, () => openPreviewTip(card, preview, character, fileName));
+}
+
 /* ============================================================
  *  预览懒加载（IntersectionObserver）
  * ============================================================ */
@@ -1287,24 +1643,7 @@ function setupPreviewObserver() {
             const fileName = card.dataset.file;
             fetchLastMessageText(character, fileName).then(text => {
                 if (!el.isConnected) return;
-                if (text === null) {
-                    el.classList.remove('is-loading');
-                    el.classList.add('is-empty');
-                    el.textContent = '（无法加载预览）';
-                } else if (!text) {
-                    el.classList.remove('is-loading');
-                    el.classList.add('is-empty');
-                    el.textContent = '（空聊天）';
-                } else {
-                    // 简单清洗 markdown 符号，保留可读性
-                    const clean = text
-                        .replace(/[*_`~]+/g, '')
-                        .replace(/\s+/g, ' ')
-                        .trim()
-                        .slice(0, 240);
-                    el.classList.remove('is-loading');
-                    el.textContent = clean;
-                }
+                renderPreviewText(el, text);
             });
         }
     }, { root: document.getElementById('cv_body'), rootMargin: '200px' });
@@ -1320,18 +1659,11 @@ function observePreviews() {
         const cached = previewCacheGet(key);
         if (cached.hit) {
             const text = cached.value;
+            renderPreviewText(el, text);
             if (text === null) {
-                el.classList.remove('is-loading'); el.classList.add('is-empty');
-                el.textContent = '（无法加载预览）';
                 // 失败仍然挂上 observer：缓存 TTL 过期后用户重新滚动到这里就会自动重试
                 // fetchLastMessageText 内部会按 cache 状态决定是否真发请求，不会浪费流量
                 previewObserver.observe(el);
-            } else if (!text) {
-                el.classList.remove('is-loading'); el.classList.add('is-empty');
-                el.textContent = '（空聊天）';
-            } else {
-                el.classList.remove('is-loading');
-                el.textContent = text.replace(/[*_`~]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 240);
             }
             return;
         }
@@ -1661,6 +1993,7 @@ const readerState = {
 };
 
 let _readerToken = 0;
+let _readerPanelBeforeExpand = null;
 async function enterReader(character, fileName) {
     if (!character || !fileName) return;
     const myToken = ++_readerToken;
@@ -1677,7 +2010,10 @@ async function enterReader(character, fileName) {
     readerState._cfgSig = null;
     readerState.settingsOpen = false;
     const panel = document.getElementById('chatvault_panel');
-    if (panel) panel.classList.add('cv-in-reader');
+    if (panel) {
+        panel.classList.add('cv-in-reader');
+        applyReaderPanelExpand(panel);
+    }
     renderReader();
     let arr;
     try {
@@ -1700,13 +2036,57 @@ function exitReader() {
     readerState._cfgSig = null;
     readerState.settingsOpen = false;
     const panel = document.getElementById('chatvault_panel');
-    if (panel) panel.classList.remove('cv-in-reader');
+    if (panel) {
+        panel.classList.remove('cv-in-reader');
+        restoreReaderPanelExpand(panel);
+    }
     render();
     // 列表 DOM 重建后恢复滚动位置（同步执行已足够，但 RAF 更稳）
     requestAnimationFrame(() => {
         const body = document.getElementById('cv_body');
         if (body) body.scrollTop = saved;
     });
+}
+
+function applyReaderPanelExpand(panel) {
+    if (isMobileLayout() || !panelEl) return;
+    const s = loadSettings();
+    if (s.readerExpandMode === 'off') return;
+    _readerPanelBeforeExpand = {
+        ...getCurrentState(panel),
+        positioned: panelEl.classList.contains('cv-window-positioned'),
+    };
+    panel.classList.add('cv-reader-expanded');
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const w = Math.min(CV_PANEL_READER_W, Math.round(vw * 0.96), vw - CV_PANEL_MARGIN * 2);
+    const h = Math.min(CV_PANEL_READER_H, Math.round(vh * 0.94), vh - CV_PANEL_MARGIN * 2);
+    applyPanelBox(panel, panelEl, {
+        x: Math.round((vw - w) / 2),
+        y: Math.round((vh - h) / 2),
+        w,
+        h,
+    }, false);
+    applyPanelLayoutClass(panel, 'wide');
+}
+
+function restoreReaderPanelExpand(panel) {
+    if (!panelEl) return;
+    panel.classList.remove('cv-reader-expanded');
+    if (_readerPanelBeforeExpand && !isMobileLayout()) {
+        applyPanelModeClasses(panelEl, panel, _readerPanelBeforeExpand.mode);
+        if (_readerPanelBeforeExpand.positioned || _readerPanelBeforeExpand.mode === 'dock') {
+            applyPanelBox(panel, panelEl, _readerPanelBeforeExpand, false);
+        } else {
+            panelEl.classList.remove('cv-window-positioned');
+            panel.style.removeProperty('left');
+            panel.style.removeProperty('top');
+            panel.style.removeProperty('width');
+            panel.style.removeProperty('height');
+            applyPanelLayoutClass(panel, getLayoutForWidth(getDefaultPanelBox(_readerPanelBeforeExpand.mode).w));
+        }
+    }
+    _readerPanelBeforeExpand = null;
 }
 
 function readerCfg() {
@@ -1851,7 +2231,7 @@ function renderReader() {
                 : `<div class="cv-reader-msg-avatar">${escapeHtml((m.who||'C').slice(0,1))}</div>`);
         const _bmHit = (readerState.character && readerState.fileName)
             ? !!findBookmark(readerState.character.avatar, readerState.fileName, m.idx) : false;
-        const _floorTitle = _bmHit ? '已有书签 · 点击编辑 / 删除' : '点击添加书签';
+        const _floorTitle = _bmHit ? '已有书签 · 打开楼层菜单' : '打开楼层菜单';
         return `
             <div class="cv-reader-msg ${m.is_user ? 'is-user' : 'is-char'}${_bmHit ? ' has-bookmark' : ''}" data-mes-idx="${m.idx}">
                 <div class="cv-reader-msg-head">
@@ -2012,9 +2392,16 @@ function openMsgMenu(msgEl, x, y) {
     const menu = document.createElement('div');
     menu.className = 'cv-msg-menu';
     menu.id = 'cv_msg_menu';
-    menu.innerHTML = exist
+    const bookmarkHtml = exist
         ? `<button data-act="edit" type="button">${ICONS.edit}<span>编辑书签</span></button><button data-act="del" type="button" class="cv-msg-menu-danger">${ICONS.trash}<span>删除书签</span></button>`
         : `<button data-act="add" type="button">${ICONS.bookmarkPlus}<span>添加书签到 #${idx}</span></button>`;
+    menu.innerHTML = `
+        <button data-act="reader-go" type="button">${ICONS.book}<span>阅读模式跳到楼层…</span></button>
+        <button data-act="chat-here" type="button">${ICONS.jump}<span>在酒馆打开 #${idx}</span></button>
+        <button data-act="chat-go" type="button">${ICONS.msg}<span>在酒馆跳到楼层…</span></button>
+        <div class="cv-msg-menu-sep" aria-hidden="true"></div>
+        ${bookmarkHtml}
+    `;
     // 挂在 chatvault_panel 内部，才能继承 .cv-theme-* 配色变量；落到 body 会变黑块
     (document.getElementById('chatvault_panel') || document.body).appendChild(menu);
     const rect = menu.getBoundingClientRect();
@@ -2034,7 +2421,10 @@ function openMsgMenu(msgEl, x, y) {
             e.stopPropagation();
             const act = b.dataset.act;
             closeMsgMenu();
-            if (act === 'add' || act === 'edit') openBookmarkModal(idx, exist);
+            if (act === 'reader-go') openFloorJumpModal('reader', idx);
+            else if (act === 'chat-here') jumpToChat(character, fileName, { floorIdx: idx });
+            else if (act === 'chat-go') openFloorJumpModal('chat', idx);
+            else if (act === 'add' || act === 'edit') openBookmarkModal(idx, exist);
             else if (act === 'del') {
                 removeBookmark(character.avatar, fileName, idx);
                 try { toastr.success(`已删除 #${idx} 书签`); } catch {}
@@ -2071,7 +2461,7 @@ function refreshBookmarkUI(idx) {
         const btn = msgEl.querySelector('.cv-reader-msg-floor');
         if (btn) {
             btn.classList.toggle('is-bm', hit);
-            btn.title = hit ? '已有书签 · 点击编辑 / 删除' : '点击添加书签';
+            btn.title = hit ? '已有书签 · 打开楼层菜单' : '打开楼层菜单';
             btn.innerHTML = (hit ? ICONS.bookmark : '')
                 + `<span class="cv-floor-num">${hit ? '' : '#'}${idx}</span>`;
         }
@@ -2081,6 +2471,81 @@ function refreshBookmarkUI(idx) {
         const panel = document.getElementById('cv_reader_settings');
         if (panel) renderReaderSettings(panel);
     }
+}
+
+function getReaderMaxFloor() {
+    const arr = readerState.arr;
+    if (!Array.isArray(arr)) return -1;
+    return arr.slice(1).length - 1;
+}
+
+function jumpReaderToFloor(idx) {
+    const maxFloor = getReaderMaxFloor();
+    if (!Number.isInteger(idx) || idx < 0 || idx > maxFloor) {
+        toastr.warning(maxFloor >= 0 ? `请输入 0-${maxFloor} 之间的楼层号` : '当前没有可跳转楼层');
+        return;
+    }
+    readerState.page = Math.floor(idx / READER_PAGE_SIZE) + 1;
+    readerState.settingsOpen = false;
+    renderReader();
+    requestAnimationFrame(() => {
+        const stage = document.querySelector('.cv-reader-stage');
+        const target = document.querySelector(`.cv-reader-msg[data-mes-idx="${idx}"]`);
+        if (stage && target) stage.scrollTop = Math.max(0, target.offsetTop - 16);
+    });
+}
+
+function openFloorJumpModal(mode, defaultIdx) {
+    const { character, fileName, arr } = readerState;
+    if (!character || !fileName || !Array.isArray(arr)) return;
+    const maxFloor = arr.slice(1).length - 1;
+    if (maxFloor < 0) { toastr.warning('当前没有可跳转楼层'); return; }
+    const safeDefault = Math.min(Math.max(0, Number(defaultIdx) || 0), maxFloor);
+    const isChat = mode === 'chat';
+    closeModal();
+    const wrap = document.createElement('div');
+    wrap.className = 'cv-modal-backdrop';
+    wrap.id = 'cv_modal';
+    wrap.innerHTML = `
+        <div class="cv-modal" onclick="event.stopPropagation()">
+            <button class="cv-modal-close" id="cv_floor_jump_close" type="button" title="关闭">${ICONS.close}</button>
+            <h3>${isChat ? '酒馆聊天跳转楼层' : '阅读模式跳转楼层'}</h3>
+            <div class="cv-modal-body">
+                <div class="cv-field">
+                    <label>楼层号</label>
+                    <input type="number" id="cv_floor_jump_input" min="0" max="${maxFloor}" value="${safeDefault}" />
+                    <div class="cv-field-hint">请输入 0-${maxFloor} 之间的楼层号</div>
+                </div>
+            </div>
+            <div class="cv-modal-actions">
+                <button class="cv-btn" id="cv_floor_jump_cancel" type="button">取消</button>
+                <button class="cv-btn cv-btn-primary" id="cv_floor_jump_go" type="button">跳转</button>
+            </div>
+        </div>
+    `;
+    wrap.onclick = closeModal;
+    document.getElementById('chatvault_panel').appendChild(wrap);
+    setTimeout(() => { const i = document.getElementById('cv_floor_jump_input'); if (i) { i.focus(); i.select(); } }, 0);
+    document.getElementById('cv_floor_jump_close').onclick = closeModal;
+    document.getElementById('cv_floor_jump_cancel').onclick = closeModal;
+    const go = () => {
+        const raw = String(document.getElementById('cv_floor_jump_input')?.value || '').trim();
+        const idx = Number(raw);
+        if (!raw || !Number.isInteger(idx) || idx < 0 || idx > maxFloor) {
+            toastr.warning(`请输入 0-${maxFloor} 之间的楼层号`);
+            return;
+        }
+        closeModal();
+        if (isChat) jumpToChat(character, fileName, { floorIdx: idx });
+        else jumpReaderToFloor(idx);
+    };
+    document.getElementById('cv_floor_jump_go').onclick = go;
+    wrap.querySelectorAll('input').forEach(inp => {
+        inp.onkeydown = (e) => {
+            if (e.key === 'Enter') go();
+            else if (e.key === 'Escape') closeModal();
+        };
+    });
 }
 
 function openBookmarkModal(idx, existing) {
@@ -3001,13 +3466,82 @@ function downloadBlob(blob, filename) {
     setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 0);
 }
 
+function chatArrayToJsonl(arr) {
+    return (Array.isArray(arr) ? arr : []).map(o => JSON.stringify(o)).join('\n') + '\n';
+}
+
+function safeChatExportBaseName(fileName) {
+    return stripExt(fileName).replace(/[\\/:*?"<>|]/g, '_') || 'chat';
+}
+
+function timestampForFileName() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function downloadChatArrayJsonl(arr, fileName, suffix = '') {
+    const safeName = safeChatExportBaseName(fileName);
+    const name = suffix ? `${safeName}.${suffix}.jsonl` : `${safeName}.jsonl`;
+    downloadBlob(new Blob([chatArrayToJsonl(arr)], { type: 'application/x-jsonlines' }), name);
+}
+
+function jsonlFileFromArray(arr, fileName) {
+    return new File([chatArrayToJsonl(arr)], withExt(fileName), { type: 'application/x-jsonlines' });
+}
+
+async function postImportChatFile(character, file) {
+    const ctx = SillyTavern.getContext();
+    const userName = ctx.name1 || ctx.user?.name || 'User';
+    const fd = new FormData();
+    fd.append('avatar_url', character.avatar);
+    fd.append('file_type', 'jsonl');
+    fd.append('user_name', userName);
+    fd.append('character_name', character.name || 'Character');
+    // ST 全局 multer 配置是 .single('avatar')，只允许这一个文件字段。
+    fd.append('avatar', file, file.name);
+
+    const reqHeaders = headers();
+    // multipart 不能手动设 Content-Type
+    delete reqHeaders['Content-Type'];
+    delete reqHeaders['content-type'];
+
+    const res = await fetch('/api/chats/import', { method: 'POST', headers: reqHeaders, body: fd });
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${txt.slice(0, 120)}`);
+    }
+}
+
+async function postSaveChatArray(character, fileName, arr) {
+    await _headersReady.catch(() => {});
+    const res = await fetch('/api/chats/save', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({
+            avatar_url: character.avatar,
+            file_name: stripExt(fileName),
+            chat: arr,
+            force: true,
+        }),
+    });
+    if (!res.ok) {
+        let msg = '';
+        try {
+            const data = await res.json();
+            msg = data?.error ? String(data.error) : JSON.stringify(data).slice(0, 120);
+        } catch {
+            msg = await res.text().then(t => t.slice(0, 120)).catch(() => '');
+        }
+        throw new Error(`HTTP ${res.status}${msg ? ' ' + msg : ''}`);
+    }
+}
+
 async function exportChatJsonl(character, fileName) {
     setStatus('正在导出 jsonl…');
     try {
         const arr = await fetchFullChat(character, fileName);
-        const text = arr.map(o => JSON.stringify(o)).join('\n') + '\n';
-        const safeName = stripExt(fileName).replace(/[\\/:*?"<>|]/g, '_');
-        downloadBlob(new Blob([text], { type: 'application/x-jsonlines' }), `${safeName}.jsonl`);
+        downloadChatArrayJsonl(arr, fileName);
         setStatus('✓ 已导出 jsonl');
     } catch (e) {
         setStatus(`❌ 导出失败: ${e.message}`);
@@ -3071,27 +3605,7 @@ async function importChatToCharacter(character, file) {
     }
     setStatus('正在导入…');
     try {
-        const ctx = SillyTavern.getContext();
-        const userName = ctx.name1 || ctx.user?.name || 'User';
-        const fd = new FormData();
-        fd.append('avatar_url', character.avatar);
-        fd.append('file_type', 'jsonl');
-        fd.append('user_name', userName);
-        fd.append('character_name', character.name || 'Character');
-        // ST 全局 multer 配置是 .single('avatar')，只允许这一个文件字段。
-        // 之前多塞一个 'file' 会触发 multer LIMIT_UNEXPECTED_FILE → 500
-        fd.append('avatar', file, file.name);
-
-        const reqHeaders = headers();
-        // multipart 不能手动设 Content-Type
-        delete reqHeaders['Content-Type'];
-        delete reqHeaders['content-type'];
-
-        const res = await fetch('/api/chats/import', { method: 'POST', headers: reqHeaders, body: fd });
-        if (!res.ok) {
-            const txt = await res.text().catch(() => '');
-            throw new Error(`HTTP ${res.status} ${txt.slice(0, 120)}`);
-        }
+        await postImportChatFile(character, file);
         toastr.success(`已导入到「${character.name || '当前角色'}」`);
         setStatus('✓ 已导入');
         // 刷新该角色的聊天列表
@@ -3115,6 +3629,571 @@ async function reloadCharacterChats(character) {
         const list = Array.isArray(data) ? data : (data ? Object.values(data) : []);
         chatsByAvatar[character.avatar] = list;
     } catch { /* 忽略 */ }
+}
+
+/* ============================================================
+ *  聊天楼层整理
+ * ============================================================ */
+
+const ORGANIZER_PAGE_SIZE = 100;
+
+function cloneOrganizerObject(obj) {
+    try {
+        if (typeof structuredClone === 'function') return structuredClone(obj);
+    } catch {}
+    try { return JSON.parse(JSON.stringify(obj)); }
+    catch { return obj; }
+}
+
+function cleanOrganizerPreview(text, maxLen = 140) {
+    return makePreviewSnippet(text, maxLen) || '（空消息）';
+}
+
+function getOrganizerMessageKind(msg) {
+    if (msg?.is_system) return 'system';
+    if (msg?.is_user) return 'user';
+    if (msg && typeof msg.mes === 'string') return 'char';
+    return 'unknown';
+}
+
+function getOrganizerMessageName(msg, character, meta) {
+    if (msg?.name && msg.name !== 'unused') return msg.name;
+    if (msg?.is_user) return meta?.user_name && meta.user_name !== 'unused' ? meta.user_name : '用户';
+    return character?.name || meta?.character_name || '角色';
+}
+
+function buildOrganizerState(arr, character) {
+    const originalArr = (Array.isArray(arr) ? arr : []).map(cloneOrganizerObject);
+    const meta = cloneOrganizerObject(originalArr[0] || {});
+    const rows = originalArr.slice(1).map((msg, i) => ({
+        id: `org_${i + 1}`,
+        originalIndex: i,
+        msg: cloneOrganizerObject(msg),
+    }));
+    return {
+        character,
+        originalArr,
+        meta,
+        rows,
+        selectedIds: new Set(),
+        lastSelectedIndex: null,
+        dirty: false,
+        backupDownloaded: false,
+        skipBackup: false,
+        page: 1,
+        pageSize: ORGANIZER_PAGE_SIZE,
+        draggingRange: null,
+        dragOverIndex: null,
+        dragOverSide: '',
+        helpOpen: false,
+    };
+}
+
+function buildArrangedChatArray(state) {
+    return [cloneOrganizerObject(state.meta), ...state.rows.map(r => cloneOrganizerObject(r.msg))];
+}
+
+function getOrganizerChangeSummary(state) {
+    const arranged = buildArrangedChatArray(state);
+    const originalCount = Math.max(0, state.originalArr.length - 1);
+    const newCount = Math.max(0, arranged.length - 1);
+    const deletedCount = Math.max(0, originalCount - newCount);
+    const originalMsgs = state.originalArr.slice(1).map(o => JSON.stringify(o));
+    const arrangedMsgs = arranged.slice(1).map(o => JSON.stringify(o));
+    const orderChanged = originalMsgs.length !== arrangedMsgs.length || originalMsgs.some((s, i) => s !== arrangedMsgs[i]);
+    return { originalCount, newCount, deletedCount, orderChanged };
+}
+
+function formatOrganizerSaveSummary(fileName, state) {
+    const s = getOrganizerChangeSummary(state);
+    const backupText = state.backupDownloaded ? '已下载' : (state.skipBackup ? '已跳过（用户确认风险）' : '未备份');
+    return `即将保存整理结果到原聊天：\n\n文件：${withExt(fileName)}\n\n本次更改：\n- 原始楼层：${s.originalCount} 楼\n- 保存后楼层：${s.newCount} 楼\n- 删除楼层：${s.deletedCount} 楼\n- 楼层顺序：${s.orderChanged ? '已调整' : '未变化'}\n- 原文件备份：${backupText}\n\n确认后会调用酒馆保存接口，写回服务器上的原聊天文件。`;
+}
+
+function getSelectedIndexes(state) {
+    return state.rows
+        .map((r, i) => state.selectedIds.has(r.id) ? i : -1)
+        .filter(i => i >= 0)
+        .sort((a, b) => a - b);
+}
+
+function getSelectedContiguousRange(state) {
+    const indexes = getSelectedIndexes(state);
+    if (!indexes.length) return null;
+    for (let i = 1; i < indexes.length; i++) {
+        if (indexes[i] !== indexes[i - 1] + 1) return null;
+    }
+    return { start: indexes[0], end: indexes[indexes.length - 1] };
+}
+
+function selectOrganizerIndexes(state, start, end) {
+    state.selectedIds.clear();
+    for (let i = start; i <= end; i++) {
+        if (state.rows[i]) state.selectedIds.add(state.rows[i].id);
+    }
+    state.lastSelectedIndex = end;
+}
+
+function getOrganizerTotalPages(state) {
+    return Math.max(1, Math.ceil(state.rows.length / Math.max(1, state.pageSize || ORGANIZER_PAGE_SIZE)));
+}
+
+function clampOrganizerPage(state) {
+    const totalPages = getOrganizerTotalPages(state);
+    state.page = Math.min(Math.max(1, Number(state.page) || 1), totalPages);
+    return totalPages;
+}
+
+function setOrganizerPageForIndex(state, index) {
+    if (!state.rows.length) { state.page = 1; return; }
+    const safeIndex = Math.min(Math.max(0, index || 0), state.rows.length - 1);
+    state.page = Math.floor(safeIndex / Math.max(1, state.pageSize || ORGANIZER_PAGE_SIZE)) + 1;
+    clampOrganizerPage(state);
+}
+
+function finishOrganizerMutation(state, start, end) {
+    state.dirty = true;
+    if (state.rows.length) {
+        const s = Math.min(Math.max(0, start), state.rows.length - 1);
+        const e = Math.min(Math.max(s, end), state.rows.length - 1);
+        selectOrganizerIndexes(state, s, e);
+        setOrganizerPageForIndex(state, s);
+    } else {
+        state.selectedIds.clear();
+        state.lastSelectedIndex = null;
+        state.page = 1;
+    }
+}
+
+function renderOrganizerPagerHtml(state, currentCount, pageStart, pageEnd) {
+    const totalPages = getOrganizerTotalPages(state);
+    if (currentCount <= state.pageSize) return '';
+    return `
+        <div class="cv-organizer-pager">
+            <div class="cv-organizer-pager-info">显示 #${pageStart} - #${Math.max(pageStart, pageEnd - 1)} / 共 ${currentCount} 楼</div>
+            <div class="cv-organizer-pager-main">
+                <button class="cv-organizer-page-btn" id="cv_org_first" type="button" ${state.page <= 1 ? 'disabled' : ''}>« 首页</button>
+                <button class="cv-organizer-page-btn" id="cv_org_prev" type="button" ${state.page <= 1 ? 'disabled' : ''}>‹ 上一页</button>
+                <span>第</span>
+                <input class="cv-organizer-page-input" id="cv_org_page" type="number" min="1" max="${totalPages}" value="${state.page}" />
+                <span>/ ${totalPages} 页</span>
+                <button class="cv-organizer-page-btn" id="cv_org_next" type="button" ${state.page >= totalPages ? 'disabled' : ''}>下一页 ›</button>
+                <button class="cv-organizer-page-btn" id="cv_org_last" type="button" ${state.page >= totalPages ? 'disabled' : ''}>末页 »</button>
+            </div>
+        </div>
+    `;
+}
+
+function moveOrganizerBlockUp(rows, start, end) {
+    if (start <= 0) return { changed: false, start, end };
+    const before = rows[start - 1];
+    const block = rows.slice(start, end + 1);
+    rows.splice(start - 1, end - start + 2, ...block, before);
+    return { changed: true, start: start - 1, end: end - 1 };
+}
+
+function moveOrganizerBlockDown(rows, start, end) {
+    if (end >= rows.length - 1) return { changed: false, start, end };
+    const after = rows[end + 1];
+    const block = rows.slice(start, end + 1);
+    rows.splice(start, end - start + 2, after, ...block);
+    return { changed: true, start: start + 1, end: end + 1 };
+}
+
+function moveOrganizerBlockToTop(rows, start, end) {
+    if (start <= 0) return { changed: false, start, end };
+    const block = rows.splice(start, end - start + 1);
+    rows.unshift(...block);
+    return { changed: true, start: 0, end: block.length - 1 };
+}
+
+function moveOrganizerBlockToBottom(rows, start, end) {
+    if (end >= rows.length - 1) return { changed: false, start, end };
+    const block = rows.splice(start, end - start + 1);
+    rows.push(...block);
+    return { changed: true, start: rows.length - block.length, end: rows.length - 1 };
+}
+
+function deleteOrganizerBlock(rows, start, end) {
+    if (start < 0 || end < start || end >= rows.length) return { changed: false, start, end };
+    rows.splice(start, end - start + 1);
+    const nextStart = Math.min(start, Math.max(0, rows.length - 1));
+    return { changed: true, start: nextStart, end: nextStart };
+}
+
+function moveOrganizerBlockToFloor(rows, start, end, targetFloor) {
+    const len = end - start + 1;
+    const total = rows.length;
+    const maxStartFloor = total - len;
+    if (!Number.isInteger(targetFloor) || targetFloor < 0 || targetFloor > maxStartFloor) {
+        return { changed: false, invalid: true, maxStartFloor, start, end };
+    }
+    const targetIndex = targetFloor;
+    if (targetIndex === start) return { changed: false, start, end };
+    const block = rows.splice(start, len);
+    rows.splice(targetIndex, 0, ...block);
+    return { changed: true, start: targetIndex, end: targetIndex + len - 1 };
+}
+
+function organizerRangeOrWarn(state) {
+    const range = getSelectedContiguousRange(state);
+    if (!range) {
+        toastr.warning(state.selectedIds.size ? '请先选择连续楼层' : '请先选择楼层');
+        return null;
+    }
+    return range;
+}
+
+
+function renderOrganizerBody(wrap, state, character, fileName) {
+    const body = wrap.querySelector('#cv_org_body');
+    const actions = wrap.querySelector('#cv_org_actions');
+    clampOrganizerPage(state);
+    const range = getSelectedContiguousRange(state);
+    const selected = getSelectedIndexes(state);
+    const originalCount = Math.max(0, state.originalArr.length - 1);
+    const currentCount = state.rows.length;
+    const deletedCount = originalCount - currentCount;
+    const pageSize = Math.max(1, state.pageSize || ORGANIZER_PAGE_SIZE);
+    const pageStart = (state.page - 1) * pageSize;
+    const pageEnd = Math.min(currentCount, pageStart + pageSize);
+    const pageRows = state.rows.slice(pageStart, pageEnd);
+    const rowsHtml = pageRows.length ? pageRows.map((row, localI) => {
+        const i = pageStart + localI;
+        const kind = getOrganizerMessageKind(row.msg);
+        const selectedClass = state.selectedIds.has(row.id) ? ' is-selected' : '';
+        const draggingClass = state.draggingRange && i >= state.draggingRange.start && i <= state.draggingRange.end ? ' is-dragging' : '';
+        const dropClass = state.dragOverIndex === i && state.dragOverSide ? ` is-drop-${state.dragOverSide}` : '';
+        const name = getOrganizerMessageName(row.msg, character, state.meta);
+        const preview = cleanOrganizerPreview(row.msg?.mes);
+        return `
+            <div class="cv-organizer-row${selectedClass}${draggingClass}${dropClass}" data-i="${i}" draggable="true">
+                <label class="cv-organizer-check" title="选择这一楼">
+                    <input type="checkbox" ${state.selectedIds.has(row.id) ? 'checked' : ''} />
+                </label>
+                <div class="cv-organizer-index">
+                    <strong>#${i}</strong>
+                    <span>原 #${row.originalIndex}</span>
+                </div>
+                <div class="cv-organizer-speaker">
+                    <span class="cv-organizer-kind is-${kind}">${escapeHtml(kind)}</span>
+                    <span>${escapeHtml(name)}</span>
+                </div>
+                <button class="cv-organizer-preview" type="button" aria-label="预览第 ${i} 层完整消息" title="点击查看完整消息">
+                    <span class="cv-organizer-preview-text">${escapeHtml(preview)}</span>
+                    <span class="cv-organizer-preview-action">预览消息</span>
+                </button>
+            </div>
+        `;
+    }).join('') : '<div class="cv-organizer-empty">没有可整理楼层</div>';
+    const selectionHint = range
+        ? `已选择全局 #${range.start} - #${range.end}，共 ${range.end - range.start + 1} 楼`
+        : (selected.length ? `当前选择不是连续区间，共 ${selected.length} 楼；移动/删除前请选择连续楼层` : '可点击行、Shift 连选，或输入全局层数范围选择');
+    const pagerHtml = renderOrganizerPagerHtml(state, currentCount, pageStart, pageEnd);
+
+    body.innerHTML = `
+        <div class="cv-organizer-head">
+            <div><strong>${escapeHtml(withExt(fileName))}</strong></div>
+            <div>原 ${originalCount} 楼 / 当前 ${currentCount} 楼${deletedCount > 0 ? ` / 已移除 ${deletedCount} 楼` : ''}</div>
+        </div>
+        <div class="cv-organizer-help-row">
+            <button class="cv-organizer-help-toggle${state.helpOpen ? ' is-open' : ''}" id="cv_org_help" type="button" aria-expanded="${state.helpOpen ? 'true' : 'false'}" title="整理说明">?</button>
+            <span>整理说明</span>
+        </div>
+        <div class="cv-organizer-warning" id="cv_org_help_body" ${state.helpOpen ? '' : 'hidden'}>整理结果只在弹窗内预览。写回前请先“备份原文件”，再点“保存更改”；保存时会二次确认并验证覆盖结果。当前页可拖拽，跨页请用“移动到第 N 层”。</div>
+        <div class="cv-organizer-range">
+            <span>选择</span>
+            <input id="cv_org_start" type="number" min="0" max="${Math.max(0, currentCount - 1)}" placeholder="起始" />
+            <span>到</span>
+            <input id="cv_org_end" type="number" min="0" max="${Math.max(0, currentCount - 1)}" placeholder="结束" />
+            <button class="cv-btn" id="cv_org_apply" type="button">选择</button>
+            <button class="cv-btn" id="cv_org_clear" type="button">取消</button>
+        </div>
+        <div class="cv-organizer-toolbar cv-organizer-movebar">
+            <button class="cv-btn" id="cv_org_up" type="button" ${!range || range.start <= 0 ? 'disabled' : ''}>上移</button>
+            <button class="cv-btn" id="cv_org_down" type="button" ${!range || range.end >= currentCount - 1 ? 'disabled' : ''}>下移</button>
+            <span class="cv-organizer-move-target">移动到第 <input id="cv_org_move_floor" type="number" min="0" max="${Math.max(0, currentCount - 1)}" placeholder="层数" /> 层 <button class="cv-btn" id="cv_org_move_to" type="button" ${!range ? 'disabled' : ''}>移动</button></span>
+        </div>
+        <div class="cv-organizer-toolbar cv-organizer-editbar">
+            <button class="cv-btn cv-btn-danger" id="cv_org_delete" type="button" ${!range ? 'disabled' : ''}>删除选中</button>
+            <button class="cv-btn" id="cv_org_reset" type="button" ${!state.dirty ? 'disabled' : ''}>重置修改</button>
+        </div>
+        <div class="cv-field-hint cv-organizer-selection">${selectionHint}</div>
+        <div class="cv-organizer-list">${rowsHtml}</div>
+        ${pagerHtml}
+    `;
+
+    actions.innerHTML = `
+        <label class="cv-organizer-skip-backup"><input id="cv_org_skip_backup" type="checkbox" ${state.skipBackup ? 'checked' : ''} /> 我理解风险，跳过备份</label>
+        <button class="cv-btn" id="cv_org_close" type="button">关闭</button>
+        <button class="cv-btn" id="cv_org_backup" type="button">备份原文件</button>
+        <button class="cv-btn cv-btn-primary" id="cv_org_write" type="button" ${!state.dirty || (!state.backupDownloaded && !state.skipBackup) ? 'disabled' : ''}>保存更改</button>
+    `;
+
+    const rerender = (opts = {}) => {
+        const list = body.querySelector('.cv-organizer-list');
+        const keepScrollTop = opts.keepScroll && list ? list.scrollTop : null;
+        renderOrganizerBody(wrap, state, character, fileName);
+        if (keepScrollTop != null) {
+            const nextList = wrap.querySelector('.cv-organizer-list');
+            if (nextList) nextList.scrollTop = keepScrollTop;
+        }
+    };
+    const applyMove = (fn) => {
+        const r = organizerRangeOrWarn(state);
+        if (!r) return;
+        const res = fn(state.rows, r.start, r.end);
+        if (!res.changed) return;
+        finishOrganizerMutation(state, res.start, res.end);
+        rerender();
+    };
+
+    body.querySelectorAll('.cv-organizer-row').forEach(rowEl => {
+        rowEl.onclick = (e) => {
+            if (e.target.closest('input, button')) return;
+            const i = Number(rowEl.dataset.i);
+            if (e.shiftKey && state.lastSelectedIndex != null) {
+                selectOrganizerIndexes(state, Math.min(state.lastSelectedIndex, i), Math.max(state.lastSelectedIndex, i));
+            } else {
+                const id = state.rows[i]?.id;
+                if (!id) return;
+                if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+                else state.selectedIds.add(id);
+                state.lastSelectedIndex = i;
+            }
+            rerender({ keepScroll: true });
+        };
+        const check = rowEl.querySelector('input');
+        if (check) check.onchange = () => rowEl.click();
+        const previewEl = rowEl.querySelector('.cv-organizer-preview');
+        if (previewEl) {
+            const openOrganizerPreview = () => openTextPreviewTip(previewEl, state.rows[Number(rowEl.dataset.i)]?.msg?.mes, '（空消息）');
+            previewEl.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openOrganizerPreview();
+            };
+            bindTextPreviewTipEvents(previewEl, openOrganizerPreview);
+        }
+        rowEl.ondragstart = (e) => {
+            const i = Number(rowEl.dataset.i);
+            if (!state.selectedIds.has(state.rows[i]?.id)) selectOrganizerIndexes(state, i, i);
+            const r = organizerRangeOrWarn(state);
+            if (!r) { e.preventDefault(); return; }
+            state.draggingRange = r;
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', String(i));
+            rowEl.classList.add('is-dragging');
+        };
+        rowEl.ondragover = (e) => {
+            if (!state.draggingRange) return;
+            e.preventDefault();
+            const rect = rowEl.getBoundingClientRect();
+            state.dragOverIndex = Number(rowEl.dataset.i);
+            state.dragOverSide = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+            rowEl.classList.toggle('is-drop-before', state.dragOverSide === 'before');
+            rowEl.classList.toggle('is-drop-after', state.dragOverSide === 'after');
+        };
+        rowEl.ondragleave = () => {
+            rowEl.classList.remove('is-drop-before', 'is-drop-after');
+        };
+        rowEl.ondrop = (e) => {
+            e.preventDefault();
+            const r = state.draggingRange || organizerRangeOrWarn(state);
+            const targetIndex = Number(rowEl.dataset.i);
+            const side = state.dragOverSide || 'before';
+            state.draggingRange = null;
+            state.dragOverIndex = null;
+            state.dragOverSide = '';
+            if (!r) { rerender(); return; }
+            if (targetIndex >= r.start && targetIndex <= r.end) { rerender(); return; }
+            const len = r.end - r.start + 1;
+            let targetFloor = targetIndex + (side === 'after' ? 1 : 0);
+            if (targetIndex > r.end) targetFloor -= len;
+            const maxStartFloor = state.rows.length - len;
+            targetFloor = Math.min(Math.max(0, targetFloor), maxStartFloor);
+            const res = moveOrganizerBlockToFloor(state.rows, r.start, r.end, targetFloor);
+            if (res.invalid) { toastr.warning(`目标层数无效，最大可移动到第 ${res.maxStartFloor} 层`); rerender(); return; }
+            if (!res.changed) { rerender(); return; }
+            finishOrganizerMutation(state, res.start, res.end);
+            rerender();
+        };
+        rowEl.ondragend = () => {
+            state.draggingRange = null;
+            state.dragOverIndex = null;
+            state.dragOverSide = '';
+            rerender();
+        };
+    });
+
+    body.querySelector('#cv_org_apply').onclick = () => {
+        const start = Number(body.querySelector('#cv_org_start').value);
+        const end = Number(body.querySelector('#cv_org_end').value || start);
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end >= state.rows.length) {
+            toastr.warning('请输入有效层数范围');
+            return;
+        }
+        selectOrganizerIndexes(state, start, end);
+        setOrganizerPageForIndex(state, start);
+        rerender();
+    };
+    body.querySelector('#cv_org_clear').onclick = () => { state.selectedIds.clear(); state.lastSelectedIndex = null; rerender(); };
+    body.querySelector('#cv_org_up').onclick = () => applyMove(moveOrganizerBlockUp);
+    body.querySelector('#cv_org_down').onclick = () => applyMove(moveOrganizerBlockDown);
+    body.querySelector('#cv_org_move_to').onclick = () => {
+        const r = organizerRangeOrWarn(state);
+        if (!r) return;
+        const targetFloor = Number(body.querySelector('#cv_org_move_floor').value);
+        const res = moveOrganizerBlockToFloor(state.rows, r.start, r.end, targetFloor);
+        if (res.invalid) { toastr.warning(`请输入 0-${res.maxStartFloor} 之间的目标层数`); return; }
+        if (!res.changed) return;
+        finishOrganizerMutation(state, res.start, res.end);
+        rerender();
+    };
+    body.querySelector('#cv_org_delete').onclick = () => {
+        const r = organizerRangeOrWarn(state);
+        if (!r) return;
+        const count = r.end - r.start + 1;
+        if (!confirm(`先从整理预览中移除全局 #${r.start} - #${r.end}，共 ${count} 楼？\n\n这一步还不会写回服务器，可用“重置修改”恢复。`)) return;
+        const res = deleteOrganizerBlock(state.rows, r.start, r.end);
+        if (!res.changed) return;
+        finishOrganizerMutation(state, res.start, res.end);
+        rerender();
+    };
+    body.querySelector('#cv_org_reset').onclick = () => {
+        if (!state.dirty) return;
+        if (!confirm('放弃当前整理修改，恢复到刚打开时的楼层顺序？')) return;
+        const fresh = buildOrganizerState(state.originalArr, character);
+        Object.assign(state, fresh);
+        rerender();
+    };
+
+    const jumpPage = (page) => { state.page = page; clampOrganizerPage(state); rerender(); };
+    const first = body.querySelector('#cv_org_first');
+    const prev = body.querySelector('#cv_org_prev');
+    const next = body.querySelector('#cv_org_next');
+    const last = body.querySelector('#cv_org_last');
+    const pageInput = body.querySelector('#cv_org_page');
+    if (first) first.onclick = () => jumpPage(1);
+    if (prev) prev.onclick = () => jumpPage(state.page - 1);
+    if (next) next.onclick = () => jumpPage(state.page + 1);
+    if (last) last.onclick = () => jumpPage(getOrganizerTotalPages(state));
+    if (pageInput) pageInput.onkeydown = (e) => {
+        if (e.key === 'Enter') jumpPage(Number(pageInput.value));
+    };
+    if (pageInput) pageInput.onchange = () => jumpPage(Number(pageInput.value));
+
+    const helpBtn = body.querySelector('#cv_org_help');
+    if (helpBtn) helpBtn.onclick = () => { state.helpOpen = !state.helpOpen; rerender({ keepScroll: true }); };
+
+    const skipBackup = actions.querySelector('#cv_org_skip_backup');
+    if (skipBackup) skipBackup.onchange = () => { state.skipBackup = skipBackup.checked; rerender(); };
+    actions.querySelector('#cv_org_close').onclick = () => closeOrganizerModal(state);
+    actions.querySelector('#cv_org_backup').onclick = () => {
+        downloadChatArrayJsonl(state.originalArr, fileName, `cvbak-${timestampForFileName()}`);
+        state.backupDownloaded = true;
+        setStatus('✓ 已备份原文件');
+        toastr.success('已备份原文件');
+        rerender();
+    };
+    actions.querySelector('#cv_org_write').onclick = async () => {
+        if (!state.backupDownloaded && !state.skipBackup) {
+            toastr.warning('请先备份原文件，或勾选“我理解风险，跳过备份”');
+            return;
+        }
+        try { await saveArrangedChatToOriginal(character, fileName, state); }
+        catch (e) {
+            console.error('[ChatVault] 整理写回失败', e);
+            setStatus(`❌ 整理写回失败: ${e.message}`);
+            toastr.error(`整理写回失败: ${e.message}`);
+        }
+    };
+}
+
+function closeOrganizerModal(state) {
+    if (state?.dirty && !confirm('整理结果尚未写回。确定关闭整理器？')) return;
+    closeModal();
+}
+
+async function saveArrangedChatToOriginal(character, fileName, state) {
+    if (!state.dirty) { toastr.info('没有需要写回的整理修改'); return; }
+    const arranged = buildArrangedChatArray(state);
+    const originalCount = Math.max(0, state.originalArr.length - 1);
+    const newCount = Math.max(0, arranged.length - 1);
+    const deletedCount = originalCount - newCount;
+
+    if (!state.backupDownloaded && !state.skipBackup) {
+        toastr.warning('请先备份原文件，或勾选“我理解风险，跳过备份”');
+        return;
+    }
+    const emptyWarn = newCount === 0 ? '\n\n注意：整理后聊天将没有任何消息楼层。' : '';
+    const skipWarn = state.skipBackup && !state.backupDownloaded ? '\n\n你选择跳过备份。如果保存后发现问题，ChatVault 无法帮你恢复原聊天。' : '';
+    if (!confirm(`${formatOrganizerSaveSummary(fileName, state)}${emptyWarn}${skipWarn}\n\n确认保存？`)) return;
+
+    setStatus('正在写回整理后的聊天…');
+    await postSaveChatArray(character, fileName, arranged);
+    await reloadCharacterChats(character);
+
+    const expectedJsonl = chatArrayToJsonl(arranged);
+    let lastReadError = null;
+    let verified = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) await new Promise(r => setTimeout(r, attempt === 1 ? 250 : 600));
+        try {
+            const readBack = await fetchFullChat(character, fileName);
+            if (chatArrayToJsonl(readBack) === expectedJsonl) {
+                verified = true;
+                break;
+            }
+            lastReadError = null;
+        } catch (e) {
+            lastReadError = e;
+        }
+    }
+    if (!verified) {
+        if (lastReadError) throw new Error(`写回后读取校验失败: ${lastReadError.message}`);
+        throw new Error('写回后读取结果与整理内容不一致，请检查聊天列表和刚下载的备份');
+    }
+
+    previewCache.delete(metaKey(character.avatar, fileName));
+    setStatus('✓ 已整理并写回');
+    toastr.success('整理完成，已写回聊天文件');
+    render();
+    closeModal();
+}
+
+function openChatOrganizerModal(character, fileName) {
+    closeModal();
+    const wrap = document.createElement('div');
+    wrap.className = 'cv-modal-backdrop';
+    wrap.id = 'cv_modal';
+    wrap.innerHTML = `
+        <div class="cv-modal cv-modal-wide cv-organizer-modal" onclick="event.stopPropagation()">
+            <button class="cv-modal-close" id="cv_org_x" type="button" title="关闭">${ICONS.close}</button>
+            <h3>整理聊天楼层</h3>
+            <div class="cv-modal-body" id="cv_org_body">
+                <div class="cv-organizer-empty">正在读取聊天楼层…</div>
+            </div>
+            <div class="cv-modal-actions" id="cv_org_actions">
+                <button class="cv-btn" id="cv_org_loading_close" type="button">关闭</button>
+            </div>
+        </div>
+    `;
+    wrap.onclick = closeModal;
+    document.getElementById('chatvault_panel').appendChild(wrap);
+    wrap.querySelector('#cv_org_x').onclick = closeModal;
+    wrap.querySelector('#cv_org_loading_close').onclick = closeModal;
+
+    fetchFullChat(character, fileName).then(arr => {
+        const state = buildOrganizerState(arr, character);
+        wrap.querySelector('#cv_org_x').onclick = () => closeOrganizerModal(state);
+        wrap.onclick = () => closeOrganizerModal(state);
+        renderOrganizerBody(wrap, state, character, fileName);
+    }).catch(e => {
+        wrap.querySelector('#cv_org_body').innerHTML = `<div class="cv-organizer-empty">读取失败：${escapeHtml(e.message)}</div>`;
+        setStatus(`❌ 读取聊天失败: ${e.message}`);
+        toastr.error(`读取聊天失败: ${e.message}`);
+    });
 }
 
 /* ============================================================
@@ -3149,6 +4228,14 @@ function openEditModal(character, fileName) {
                     <input type="text" id="cv_m_file" value="${escapeHtml(fileName)}" />
                     <div class="cv-field-hint">修改这里会真正在服务器上重命名文件</div>
                 </div>
+                <div class="cv-section-divider"></div>
+                <div class="cv-edit-tool-row">
+                    <div>
+                        <div class="cv-edit-tool-title">聊天楼层整理</div>
+                        <div class="cv-field-hint">移动或删除聊天楼层，写回前会先备份并确认。</div>
+                    </div>
+                    <button class="cv-btn" id="cv_m_organize" type="button">整理楼层</button>
+                </div>
             </div>
 
             <div class="cv-modal-actions">
@@ -3163,6 +4250,7 @@ function openEditModal(character, fileName) {
 
     document.getElementById('cv_m_close').onclick = closeModal;
     document.getElementById('cv_m_cancel').onclick = closeModal;
+    document.getElementById('cv_m_organize').onclick = () => openChatOrganizerModal(character, fileName);
     document.getElementById('cv_m_save').onclick = async () => {
         const newTitle = document.getElementById('cv_m_title').value.trim();
         const newTags = document.getElementById('cv_m_tags').value
@@ -3185,6 +4273,16 @@ function openEditModal(character, fileName) {
             }
             if (!FILENAME_RE.test(stripExt(newFile))) {
                 toastr.error('文件名包含不允许的字符（仅允许字母数字中文及常见标点）');
+                return;
+            }
+            const newBase = stripExt(newFile).toLowerCase();
+            const oldBase = stripExt(fileName).toLowerCase();
+            const exists = (chatsByAvatar[character.avatar] || []).some(c => {
+                const base = stripExt(c.file_name || '').toLowerCase();
+                return base === newBase && base !== oldBase;
+            });
+            if (exists) {
+                toastr.error('同一角色下已存在同名聊天文件');
                 return;
             }
             try {
@@ -3359,7 +4457,9 @@ async function handleDelete(character, fileName) {
                     else delete c.chat;
                 }
             });
-        } catch {}
+        } catch (e) {
+            console.warn('[ChatVault] 删除后同步 ST 当前聊天字段失败，已忽略', e);
+        }
         setStatus('✓ 已删除');
         render();
     } catch (e) {
@@ -3392,14 +4492,91 @@ function removeButton() {
     document.getElementById('chatvault_open_btn')?.remove();
 }
 
+function clampDockTabTop(v) {
+    return _clamp(_num(v, 0.34), 0, 1);
+}
+
+function getDockTabMaxTop(tab) {
+    return Math.max(0, (window.innerHeight || 1) - (tab?.offsetHeight || 1));
+}
+
+function applyDockTabTop(tab, topRatio = loadSettings().dockTabTop) {
+    const maxTop = getDockTabMaxTop(tab);
+    tab.style.top = `${Math.round(clampDockTabTop(topRatio) * maxTop)}px`;
+}
+
+function bindDockTabDrag(tab) {
+    tab.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startY = e.clientY;
+        const startPx = tab.getBoundingClientRect().top;
+        let moved = false;
+        tab.setPointerCapture?.(e.pointerId);
+        tab.classList.add('is-dragging');
+        const move = (ev) => {
+            const dy = ev.clientY - startY;
+            if (Math.abs(dy) > 3) moved = true;
+            const maxTop = getDockTabMaxTop(tab);
+            const nextPx = _clamp(startPx + dy, 0, maxTop);
+            const next = maxTop > 0 ? nextPx / maxTop : 0;
+            tab.style.top = `${Math.round(nextPx)}px`;
+            tab.dataset.nextTop = String(next);
+        };
+        const up = (ev) => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+            tab.releasePointerCapture?.(ev.pointerId);
+            tab.classList.remove('is-dragging');
+            const next = clampDockTabTop(tab.dataset.nextTop || loadSettings().dockTabTop);
+            const cur = loadSettings();
+            saveSettings({ ...cur, dockTabTop: next });
+            delete tab.dataset.nextTop;
+            if (!moved) openPanel('dock');
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    });
+}
+
+function injectDockTab() {
+    if (isMobileLayout()) return;
+    if (document.getElementById('chatvault_dock_tab')) return;
+    const s = loadSettings();
+    if (!s.leftDockButton) return;
+    const tab = document.createElement('button');
+    tab.id = 'chatvault_dock_tab';
+    tab.type = 'button';
+    tab.title = '打开聊天档案侧栏（可上下拖动）';
+    tab.innerHTML = `<i class="fa-solid fa-book"></i><span>档案</span>`;
+    bindDockTabDrag(tab);
+    document.body.appendChild(tab);
+    applyDockTabTop(tab, s.dockTabTop);
+}
+
+function removeDockTab() {
+    document.getElementById('chatvault_dock_tab')?.remove();
+}
+
+function applyDockTabState() {
+    const s = loadSettings();
+    if (s.leftDockButton) {
+        injectDockTab();
+        const tab = document.getElementById('chatvault_dock_tab');
+        if (tab) applyDockTabTop(tab);
+    } else removeDockTab();
+}
+
 function applyEnabledState() {
     const s = loadSettings();
     if (s.enabled) injectButton();
     else {
         removeButton();
-        if (panelEl) closePanel();
+        if (panelEl && !s.welcomeButton && !s.leftDockButton) closePanel();
     }
     applyWelcomeButtonState();
+    applyDockTabState();
 }
 
 /* ============================================================
@@ -3415,7 +4592,7 @@ let _cvWelcomeObserver = null;
 
 function injectWelcomeButton() {
     const s = loadSettings();
-    if (!s.enabled || !s.welcomeButton) return;
+    if (!s.welcomeButton) return;
     // 多套选择器逐级回退，兼容不同版本的酒馆欢迎消息 DOM
     // 1) 已知 ID（ST 主流欢迎页常见）：API/角色/扩展按钮
     // 2) 系统消息 mes_text 里的 menu_button（含 is_system 属性 / class 两种写法）
@@ -3509,7 +4686,7 @@ function stopWelcomeObserver() {
 
 function applyWelcomeButtonState() {
     const s = loadSettings();
-    if (s.enabled && s.welcomeButton) startWelcomeObserver();
+    if (s.welcomeButton) startWelcomeObserver();
     else stopWelcomeObserver();
 }
 
@@ -3531,83 +4708,160 @@ function isMobileLayout() {
     return !!(window.matchMedia && window.matchMedia('(max-width: 720px)').matches);
 }
 
-/* ----- v0.3.30-test：改成 transform: scale 等比缩放 -----
- * - 状态从 {x,y,w,h} 改成 {x,y,scale}
- * - scale 范围 0.4 ~ 3.0（v0.3.31 起；移除了双击最大化以避免误触）
- * - 内部布局始终按"原生像素"排版，不会因为缩放错乱
- */
-const CV_MIN_SCALE = 0.4;
-const CV_MAX_SCALE = 3.0;
+/* ----- 桌面尺寸模式：用真实宽高替代 transform: scale ----- */
+const CV_PANEL_MIN_W = 340;
+const CV_PANEL_MIN_H = 520;
+const CV_PANEL_WIDE_AT = 760;
+const CV_PANEL_MARGIN = 12;
+const CV_PANEL_DOCK_W = 420;
+const CV_PANEL_MODAL_W = 1100;
+const CV_PANEL_MODAL_H = 800;
+const CV_PANEL_READER_W = 1180;
+const CV_PANEL_READER_H = 900;
 
-function ensureNativeSize(panel) {
-    if (panel._cvNative) return panel._cvNative;
-    // 测量必须在 transform 应用之前；此函数被首次调用时面板还没缩放过
-    const prev = panel.style.transform;
-    if (prev) panel.style.removeProperty('transform');
-    const r = panel.getBoundingClientRect();
-    panel._cvNative = { w: Math.round(r.width), h: Math.round(r.height) };
-    if (prev) panel.style.setProperty('transform', prev, 'important');
-    return panel._cvNative;
+function _num(v, fallback) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
 }
 
-function clampState(state, nativeW, nativeH) {
-    const vw = window.innerWidth, vh = window.innerHeight;
-    let scale = Math.max(CV_MIN_SCALE, Math.min(CV_MAX_SCALE, state.scale));
-    // 屏幕装不下当前 scale 时进一步压低
-    const maxFit = Math.min(vw / nativeW, vh / nativeH);
-    if (scale > maxFit) scale = maxFit;
-    const visW = nativeW * scale, visH = nativeH * scale;
-    let x = visW >= vw ? 0 : Math.max(0, Math.min(state.x, vw - visW));
-    let y = visH >= vh ? 0 : Math.max(0, Math.min(state.y, vh - visH));
-    return { x, y, scale };
+function _clamp(n, min, max) {
+    return Math.max(min, Math.min(max, n));
 }
 
-function applyTransform(panel, state) {
-    const { w, h } = ensureNativeSize(panel);
-    const c = clampState(state, w, h);
-    panel.style.setProperty('left',   c.x + 'px', 'important');
-    panel.style.setProperty('top',    c.y + 'px', 'important');
-    panel.style.setProperty('transform', `scale(${c.scale})`, 'important');
-    panel.style.setProperty('transform-origin', 'top left', 'important');
-    return c;
+function getDesktopPanelMode(s = loadSettings(), overrideMode = '') {
+    const raw = overrideMode || s.desktopPanelMode;
+    return raw === 'dock' ? 'dock' : 'modal';
+}
+
+function getDefaultPanelBox(mode = getDesktopPanelMode()) {
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const maxW = Math.max(CV_PANEL_MIN_W, vw - CV_PANEL_MARGIN * 2);
+    const maxH = Math.max(CV_PANEL_MIN_H, vh - CV_PANEL_MARGIN * 2);
+    if (mode === 'dock') {
+        const w = Math.min(CV_PANEL_DOCK_W, maxW);
+        const h = maxH;
+        return { x: CV_PANEL_MARGIN, y: CV_PANEL_MARGIN, w, h };
+    }
+    const w = Math.min(CV_PANEL_MODAL_W, Math.round(vw * 0.95), maxW);
+    const h = Math.min(CV_PANEL_MODAL_H, Math.round(vh * 0.92), maxH);
+    return { x: Math.round((vw - w) / 2), y: Math.round((vh - h) / 2), w, h };
+}
+
+function getLayoutForWidth(width, s = loadSettings()) {
+    if (s.desktopCardLayout === 'narrow') return 'narrow';
+    if (s.desktopCardLayout === 'wide') return 'wide';
+    return width >= CV_PANEL_WIDE_AT ? 'wide' : 'narrow';
+}
+
+function applyPanelLayoutClass(panel, layout) {
+    const l = layout === 'wide' ? 'wide' : 'narrow';
+    panel.classList.toggle('cv-layout-wide', l === 'wide');
+    panel.classList.toggle('cv-layout-narrow', l !== 'wide');
+    return l;
+}
+
+function applyPanelModeClasses(overlay, panel, mode) {
+    const m = mode === 'dock' ? 'dock' : 'modal';
+    overlay.classList.toggle('cv-mode-dock', m === 'dock');
+    overlay.classList.toggle('cv-mode-modal', m !== 'dock');
+    panel.classList.toggle('cv-mode-dock', m === 'dock');
+    panel.classList.toggle('cv-mode-modal', m !== 'dock');
+    return m;
+}
+
+function clampPanelBox(box) {
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const maxW = Math.max(CV_PANEL_MIN_W, vw - CV_PANEL_MARGIN * 2);
+    const maxH = Math.max(CV_PANEL_MIN_H, vh - CV_PANEL_MARGIN * 2);
+    const w = _clamp(Math.round(_num(box.w, CV_PANEL_MODAL_W)), CV_PANEL_MIN_W, maxW);
+    const h = _clamp(Math.round(_num(box.h, CV_PANEL_MODAL_H)), CV_PANEL_MIN_H, maxH);
+    const xMax = Math.max(CV_PANEL_MARGIN, vw - w - CV_PANEL_MARGIN);
+    const yMax = Math.max(CV_PANEL_MARGIN, vh - h - CV_PANEL_MARGIN);
+    const x = _clamp(Math.round(_num(box.x, CV_PANEL_MARGIN)), CV_PANEL_MARGIN, xMax);
+    const y = _clamp(Math.round(_num(box.y, CV_PANEL_MARGIN)), CV_PANEL_MARGIN, yMax);
+    return { x, y, w, h };
+}
+
+function applyPanelBox(panel, overlay, box, persistLayout = true) {
+    const mode = panel.classList.contains('cv-mode-dock') ? 'dock' : 'modal';
+    const fallback = getDefaultPanelBox(mode);
+    const c = clampPanelBox({ ...fallback, ...(box || {}) });
+    overlay.classList.add('cv-window-positioned');
+    panel.style.setProperty('left', c.x + 'px', 'important');
+    panel.style.setProperty('top', c.y + 'px', 'important');
+    panel.style.setProperty('width', c.w + 'px', 'important');
+    panel.style.setProperty('height', c.h + 'px', 'important');
+    panel.style.removeProperty('transform');
+    panel.style.removeProperty('transform-origin');
+    const layout = applyPanelLayoutClass(panel, getLayoutForWidth(c.w));
+    updatePaginationAutoHideMode();
+    if (persistLayout) panel.dataset.cvLayout = layout;
+    return { ...c, layout };
 }
 
 function getCurrentState(panel) {
-    const left = parseFloat(panel.style.left) || 0;
-    const top  = parseFloat(panel.style.top)  || 0;
-    const m = /scale\(([0-9.]+)\)/.exec(panel.style.transform || '');
-    const scale = m ? parseFloat(m[1]) : 1;
-    return { x: left, y: top, scale };
+    const r = panel.getBoundingClientRect();
+    const x = Number.isFinite(parseFloat(panel.style.left)) ? parseFloat(panel.style.left) : r.left;
+    const y = Number.isFinite(parseFloat(panel.style.top)) ? parseFloat(panel.style.top) : r.top;
+    const w = Number.isFinite(parseFloat(panel.style.width)) ? parseFloat(panel.style.width) : r.width;
+    const h = Number.isFinite(parseFloat(panel.style.height)) ? parseFloat(panel.style.height) : r.height;
+    const layout = getLayoutForWidth(w);
+    const mode = panel.classList.contains('cv-mode-dock') ? 'dock' : 'modal';
+    return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), layout, mode };
 }
 
 function saveWindowStatePartial(patch) {
     const s = loadSettings();
     const cur = { ...(s.windowState || {}) };
-    // 清掉旧版本残留的 w/h/maximized 字段
-    delete cur.w; delete cur.h; delete cur.maximized;
+    delete cur.scale; delete cur.maximized;
     saveSettings({ ...s, windowState: { ...cur, ...patch } });
 }
 
-function applyWindowState(overlay, panel) {
+function normalizeWindowState(st, mode) {
+    if (!st || typeof st !== 'object') return null;
+    const box = getDefaultPanelBox(mode);
+    // 兼容旧版 {x,y,scale}：只用它估一个尺寸，不再写 transform。
+    if (typeof st.scale === 'number' && typeof st.w !== 'number') {
+        const sc = _clamp(st.scale, 0.4, 3);
+        return clampPanelBox({
+            x: _num(st.x, box.x),
+            y: _num(st.y, box.y),
+            w: box.w * sc,
+            h: box.h * sc,
+        });
+    }
+    if (typeof st.w !== 'number' || typeof st.h !== 'number') return null;
+    return clampPanelBox({
+        x: _num(st.x, box.x),
+        y: _num(st.y, box.y),
+        w: st.w,
+        h: st.h,
+    });
+}
+
+function applyWindowState(overlay, panel, modeOverride = '') {
     if (isMobileLayout()) return;
     const s = loadSettings();
-    if (s.windowFreeMode) overlay.classList.add('cv-window-free');
+    const mode = applyPanelModeClasses(overlay, panel, getDesktopPanelMode(s, modeOverride));
+    if (s.windowFreeMode || mode === 'dock') overlay.classList.add('cv-window-free');
+    else overlay.classList.remove('cv-window-free');
+
     const st = s.windowState;
-    if (st && typeof st.x === 'number' && typeof st.y === 'number' && typeof st.scale === 'number') {
-        // 在应用 transform 之前先量原生尺寸
-        ensureNativeSize(panel);
-        overlay.classList.add('cv-window-positioned');
-        applyTransform(panel, st);
+    const usableSavedState = st && (!st.mode || st.mode === mode);
+    const box = usableSavedState ? normalizeWindowState(st, mode) : null;
+    if (box || mode === 'dock') {
+        applyPanelBox(panel, overlay, box || getDefaultPanelBox(mode));
+    } else {
+        applyPanelLayoutClass(panel, getLayoutForWidth(getDefaultPanelBox(mode).w, s));
     }
 }
 
 function _ensurePositioned(overlay, panel) {
     if (overlay.classList.contains('cv-window-positioned')) return;
-    // 进入定位模式之前，面板还在 flex 居中状态，量出当前位置作为起点
     const r = panel.getBoundingClientRect();
-    ensureNativeSize(panel);
-    overlay.classList.add('cv-window-positioned');
-    applyTransform(panel, { x: Math.round(r.left), y: Math.round(r.top), scale: 1 });
+    applyPanelBox(panel, overlay, { x: r.left, y: r.top, w: r.width, h: r.height });
 }
 
 function _onPointerEnd(panel, cleanup) {
@@ -3626,10 +4880,10 @@ function _bindDrag(panel, overlay, handle) {
         const startX = e.clientX, startY = e.clientY;
         const startState = getCurrentState(panel);
         const move = (ev) => {
-            applyTransform(panel, {
+            applyPanelBox(panel, overlay, {
+                ...startState,
                 x: startState.x + (ev.clientX - startX),
                 y: startState.y + (ev.clientY - startY),
-                scale: startState.scale,
             });
         };
         const up = () => _onPointerEnd(panel, () => {
@@ -3641,25 +4895,22 @@ function _bindDrag(panel, overlay, handle) {
     });
 }
 
-function _bindScaleResize(panel, overlay, handle) {
+function _bindPanelResize(panel, overlay, handle, dir) {
     handle.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
         _ensurePositioned(overlay, panel);
         const startX = e.clientX, startY = e.clientY;
-        const startState = getCurrentState(panel);
-        const { w: nativeW, h: nativeH } = ensureNativeSize(panel);
+        const start = getCurrentState(panel);
         const move = (ev) => {
             const dx = ev.clientX - startX;
             const dy = ev.clientY - startY;
-            // 取水平/垂直拖动量中较大的那个作为缩放参考，无论沿哪个方向拖都跟手
-            const delta = Math.max(dx / nativeW, dy / nativeH);
-            applyTransform(panel, {
-                x: startState.x,
-                y: startState.y,
-                scale: startState.scale + delta,
-            });
+            const next = { ...start };
+            if (dir.includes('e')) next.w = start.w + dx;
+            if (dir.includes('w')) { next.w = start.w - dx; next.x = start.x + dx; }
+            if (dir.includes('s')) next.h = start.h + dy;
+            applyPanelBox(panel, overlay, next);
         };
         const up = () => _onPointerEnd(panel, () => {
             window.removeEventListener('pointermove', move);
@@ -3673,12 +4924,13 @@ function _bindScaleResize(panel, overlay, handle) {
 function initWindowChrome(overlay, panel) {
     if (isMobileLayout()) return;
 
-    // 只保留右下角一个缩放把手
-    const seHandle = document.createElement('div');
-    seHandle.className = 'cv-resize-handle cv-rh-se';
-    seHandle.dataset.dir = 'se';
-    panel.appendChild(seHandle);
-    _bindScaleResize(panel, overlay, seHandle);
+    ['w', 'e', 'se'].forEach(dir => {
+        const handle = document.createElement('div');
+        handle.className = `cv-resize-handle cv-rh-${dir}`;
+        handle.dataset.dir = dir;
+        panel.appendChild(handle);
+        _bindPanelResize(panel, overlay, handle, dir);
+    });
 
     // 阅读模式下顶部一条窄拖动条（普通模式靠 header）
     const dragStrip = document.createElement('div');
@@ -3694,7 +4946,7 @@ function initWindowChrome(overlay, panel) {
     const onWinResize = () => {
         if (isMobileLayout()) return;
         if (!overlay.classList.contains('cv-window-positioned')) return;
-        applyTransform(panel, getCurrentState(panel));
+        applyPanelBox(panel, overlay, getCurrentState(panel), false);
     };
     window.addEventListener('resize', onWinResize);
     // v0.5.16 fix: 必须挂在 overlay（= panelEl）上，因为 closePanel 用 panelEl._cvOnResize 查找；
@@ -3716,8 +4968,9 @@ function resetWindow() {
     panel.style.removeProperty('transform-origin');
     panel.style.removeProperty('width');
     panel.style.removeProperty('height');
-    // 让下次拖动重新测量原生尺寸（视口可能已经变化）
-    delete panel._cvNative;
+    panel.classList.remove('cv-reader-expanded');
+    panel.dataset.cvLayout = '';
+    applyWindowState(panelEl, panel);
 }
 
 function parseHotkeyCombo(str) {
@@ -3892,13 +5145,19 @@ function injectSettings() {
           <div class="cv-settings-row">
             <label class="checkbox_label" for="cv_set_enabled">
               <input type="checkbox" id="cv_set_enabled" ${s.enabled ? 'checked' : ''}>
-              <span>启用入口按钮（在扩展菜单里显示「聊天档案」）</span>
+              <span>启用魔法棒菜单入口按钮</span>
             </label>
           </div>
           <div class="cv-settings-row">
             <label class="checkbox_label" for="cv_set_welcome_btn">
               <input type="checkbox" id="cv_set_welcome_btn" ${s.welcomeButton ? 'checked' : ''}>
               <span>在欢迎页底部显示快捷按钮（与 API 连接 / 角色管理 / 扩展程序 同排）</span>
+            </label>
+          </div>
+          <div class="cv-settings-row">
+            <label class="checkbox_label" for="cv_set_left_dock_btn">
+              <input type="checkbox" id="cv_set_left_dock_btn" ${s.leftDockButton !== false ? 'checked' : ''}>
+              <span>启用侧边栏入口按钮（仅 PC 端）</span>
             </label>
           </div>
           <div class="cv-settings-row">
@@ -3959,6 +5218,27 @@ function injectSettings() {
             </div>
             <div class="inline-drawer-content">
               <div class="cv-settings-row">
+                <label for="cv_set_desktop_mode">桌面面板样式：</label>
+                <select id="cv_set_desktop_mode">
+                  <option value="modal" ${s.desktopPanelMode !== 'dock' ? 'selected' : ''}>经典居中弹窗</option>
+                  <option value="dock" ${s.desktopPanelMode === 'dock' ? 'selected' : ''}>左侧停靠栏</option>
+                </select>
+              </div>
+              <div class="cv-settings-row">
+                <label for="cv_set_card_layout">卡片布局：</label>
+                <select id="cv_set_card_layout">
+                  <option value="auto" ${s.desktopCardLayout !== 'narrow' && s.desktopCardLayout !== 'wide' ? 'selected' : ''}>自动（按面板宽度）</option>
+                  <option value="narrow" ${s.desktopCardLayout === 'narrow' ? 'selected' : ''}>紧凑单列</option>
+                  <option value="wide" ${s.desktopCardLayout === 'wide' ? 'selected' : ''}>宽屏双列</option>
+                </select>
+              </div>
+              <div class="cv-settings-row">
+                <label class="checkbox_label" for="cv_set_reader_expand">
+                  <input type="checkbox" id="cv_set_reader_expand" ${s.readerExpandMode !== 'off' ? 'checked' : ''}>
+                  <span>进入阅读模式时自动展开大屏</span>
+                </label>
+              </div>
+              <div class="cv-settings-row">
                 <label class="checkbox_label" for="cv_set_window_free">
                   <input type="checkbox" id="cv_set_window_free" ${s.windowFreeMode ? 'checked' : ''}>
                   <span>桌面自由窗口模式（去掉背景遮罩，可同时操作酒馆）</span>
@@ -3975,10 +5255,10 @@ function injectSettings() {
                 <input type="text" id="cv_set_hotkey_combo" class="text_pole" value="${escapeHtml(s.windowHotkeyCombo || 'Alt+V')}" placeholder="例：Alt+V / Ctrl+Shift+K">
               </div>
               <div class="cv-settings-row">
-                <button id="cv_set_window_reset" class="menu_button cv-inline-btn">⟲ 复位窗口位置/缩放</button>
+                <button id="cv_set_window_reset" class="menu_button cv-inline-btn">⟲ 复位窗口位置/尺寸</button>
               </div>
               <div class="cv-settings-hint">
-                🖥️ 拖标题栏移动；右下角 ⌟ 角等比缩放（0.4×–3.0×，不会破坏内部排版）；状态自动记忆。<br>
+                🖥️ 拖标题栏移动；拖左右边缘调整宽度，窄宽切换会自动改变单列/双列布局，不再等比缩放整个面板。<br>
                 ⚠️ 自定义快捷键时请避开酒馆/浏览器已用组合（如 Ctrl+S、F5）；在输入框焦点时快捷键不会触发。
               </div>
             </div>
@@ -4014,7 +5294,7 @@ function injectSettings() {
         const cur = loadSettings();
         const newTheme = e.target.value;
         saveSettings({ ...cur, theme: newTheme });
-        if (panelEl) panelEl.className = currentThemeClass();
+        if (panelEl) applyThemeClass(panelEl);
         applyCustomColors();
         // 显隐自定义配色面板
         const cdw = wrap.querySelector('#cv_color_drawer_wrap');
@@ -4207,11 +5487,32 @@ function injectSettings() {
     renderColorGrid();
 
     // 桌面窗口设置
+    wrap.querySelector('#cv_set_desktop_mode').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, desktopPanelMode: e.target.value === 'dock' ? 'dock' : 'modal', windowState: null });
+        if (panelEl) resetWindow();
+    });
+    wrap.querySelector('#cv_set_card_layout').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        const val = ['auto', 'narrow', 'wide'].includes(e.target.value) ? e.target.value : 'auto';
+        saveSettings({ ...cur, desktopCardLayout: val });
+        const panel = document.getElementById('chatvault_panel');
+        if (panel) applyPanelLayoutClass(panel, getLayoutForWidth(getCurrentState(panel).w));
+    });
+    wrap.querySelector('#cv_set_reader_expand').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, readerExpandMode: e.target.checked ? 'auto' : 'off' });
+    });
+    wrap.querySelector('#cv_set_left_dock_btn').addEventListener('change', (e) => {
+        const cur = loadSettings();
+        saveSettings({ ...cur, leftDockButton: !!e.target.checked });
+        applyDockTabState();
+    });
     wrap.querySelector('#cv_set_window_free').addEventListener('change', (e) => {
         const cur = loadSettings();
         const on = !!e.target.checked;
         saveSettings({ ...cur, windowFreeMode: on });
-        if (panelEl) panelEl.classList.toggle('cv-window-free', on);
+        if (panelEl) panelEl.classList.toggle('cv-window-free', on || panelEl.classList.contains('cv-mode-dock'));
     });
     wrap.querySelector('#cv_set_hotkey').addEventListener('change', (e) => {
         const cur = loadSettings();
@@ -4245,12 +5546,14 @@ jQuery(async () => {
          || document.getElementById('extensions_settings')) injectSettings();
         // 欢迎页按钮：等 #chat 就绪后挂 observer（observer 自己会重试）
         if (document.getElementById('chat')) applyWelcomeButtonState();
+        applyDockTabState();
 
         const cur = loadSettings();
         const needBtn = cur.enabled && !document.getElementById('chatvault_open_btn');
         const needSet = !document.getElementById('chatvault_settings');
-        const needWelcomeObs = cur.enabled && cur.welcomeButton && !_cvWelcomeObserver;
-        if (needBtn || needSet || needWelcomeObs) {
+        const needWelcomeObs = cur.welcomeButton && !_cvWelcomeObserver;
+        const needDockTab = cur.leftDockButton && !document.getElementById('chatvault_dock_tab');
+        if (needBtn || needSet || needWelcomeObs || needDockTab) {
             if (++_injectTries < INJECT_MAX_TRIES) {
                 setTimeout(tryInject, 500);
             } else {
