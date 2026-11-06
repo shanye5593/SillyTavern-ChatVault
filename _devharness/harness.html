@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- A real phone page has this; it is also what makes CDP's mobile emulation
+     treat the layout viewport as width=device-width. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ChatVault harness</title>
+<style>
+  /* ---- Fake SillyTavern shell -------------------------------------------
+     Only there to (a) give the plugin the DOM nodes its injector polls for and
+     (b) give screenshots a plausible backdrop instead of a white page.
+     The real subject of every screenshot is #chatvault_overlay. */
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #14161a;
+    color: #d7dae0;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 15px;
+    min-height: 100vh;
+  }
+  #bg-topbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; background: #1b1e24; border-bottom: 1px solid #2a2e36;
+    font-size: 13px;
+  }
+  #bg-topbar .dot { width: 10px; height: 10px; border-radius: 50%; background: #34d399; }
+  #chat { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .mes { background: #1e2128; border: 1px solid #2a2e36; border-radius: 10px; padding: 10px 12px; max-width: 92%; }
+  .mes.is_user { align-self: flex-end; background: #23282f; }
+  .mes .ch_name { font-size: 12px; color: #9aa0a6; margin-bottom: 4px; }
+  .mes_text { line-height: 1.6; }
+  .mes_text .menu_button {
+    display: inline-block; margin: 6px 6px 0 0; padding: 6px 10px;
+    border: 1px solid #3c4046; border-radius: 6px; background: #262a31; font-size: 12px;
+  }
+  #send_form {
+    position: sticky; bottom: 0; display: flex; gap: 8px; padding: 10px 12px;
+    background: #1b1e24; border-top: 1px solid #2a2e36;
+  }
+  #send_textarea { flex: 1; min-height: 38px; background: #12141a; color: #d7dae0; border: 1px solid #2f3440; border-radius: 8px; padding: 8px; font: inherit; }
+  #send_but { width: 42px; border-radius: 8px; background: #2f6f5b; border: 1px solid #3c8a71; }
+  #right-nav-panel { display: none; }
+  #extensionsMenu { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+  #extensionsMenu .list-group-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #3c4046; border-radius: 6px; }
+  #extensions_settings2 { padding: 10px; }
+  #chatvault_settings { display: none; } /* keep the settings page out of the screenshots */
+</style>
+<link rel="stylesheet" href="dist/style.css">
+</head>
+<body>
+
+<!-- ===================== fake SillyTavern shell ===================== -->
+<div id="bg-topbar"><span class="dot"></span><span>SillyTavern (mock)</span></div>
+
+<div id="chat">
+  <div class="mes" is_system="true" is_user="false">
+    <div class="ch_name">System</div>
+    <div class="mes_text">
+      欢迎使用 SillyTavern。<br>
+      这是一个用于 ChatVault 手机端验证的 mock 页面。
+      <div class="menu_button" id="api_button">API 连接</div>
+      <div class="menu_button" id="advanced_div">角色管理</div>
+      <div class="menu_button" id="extensionsMenuButton">扩展程序</div>
+    </div>
+  </div>
+  <div class="mes" data-cv-fixture="1">
+    <div class="ch_name">苏晚</div>
+    <div class="mes_text">雨是傍晚开始下的。咖啡馆临街的落地窗上蒙着一层薄薄的水汽……</div>
+  </div>
+  <div class="mes is_user" data-cv-fixture="1">
+    <div class="ch_name">旅人</div>
+    <div class="mes_text">（推门进来，收起伞）抱歉，路上有点堵。</div>
+  </div>
+</div>
+
+<div id="send_form">
+  <textarea id="send_textarea" placeholder="输入消息…"></textarea>
+  <div id="send_but" class="menu_button"></div>
+</div>
+
+<!-- nodes the plugin's injector polls for (it gives up after 30s otherwise) -->
+<div id="right-nav-panel"><div id="extensionsMenu"></div></div>
+<div id="extensions_settings2"></div>
+
+<!-- ===================== harness ===================== -->
+<script src="fixtures.js"></script>
+<script src="mocks.js"></script>
+<!-- the real plugin, copied fresh by run.ps1 (classic script; needs the globals
+     defined above and declares its UI functions as globals) -->
+<script src="dist/index.js"></script>
+<script src="scenes.js"></script>
+<script src="measure.js"></script>
+</body>
+</html>

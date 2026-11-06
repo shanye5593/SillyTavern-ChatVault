@@ -4,7 +4,7 @@
  * https://github.com/shanye5593/SillyTavern-ChatVault
  */
 
-const VERSION = '0.5.8';
+const VERSION = '0.6.0';
 const STORAGE_KEY = 'st-chatvault-meta';
 const SETTINGS_KEY = 'st-chatvault-settings';
 const PAGE_SIZE = 50;
@@ -806,6 +806,171 @@ const ICONS = {
  *  UI 顶层
  * ============================================================ */
 
+/* ---- v0.6.0 手机适配：视觉视口 / 软键盘 / 背景滚动锁 ----
+ * 目的：
+ *  1) 手机上 #chatvault_overlay 是满屏 fixed，iOS/Android 弹出软键盘时
+ *     布局视口不变、只有 visualViewport 变矮 → 面板底部（弹窗按钮、分页器）
+ *     会被键盘盖住。这里把 visualViewport 的 height/offsetTop 写进 CSS 变量，
+ *     CSS 里 #chatvault_overlay 用它们定位，于是整个面板跟着“可见区域”收缩。
+ *  2) 打开面板时锁住 body 滚动，避免 iOS 背景页面被手指带着一起滚（回弹）。
+ *  3) 关闭面板时把监听器和变量一起清掉 —— 遵守“关闭面板 = 关闭一切监听器”。
+ */
+let _cvBodyOverflowBefore = null;
+let _cvHtmlOverflowBefore = null;
+let _cvVVFrame = 0;
+
+function _cvLockBodyScroll() {
+    if (_cvBodyOverflowBefore !== null) return;
+    const html = document.documentElement;
+    const body = document.body;
+    _cvHtmlOverflowBefore = html.style.overflow || '';
+    _cvBodyOverflowBefore = body.style.overflow || '';
+    html.classList.add('cv-scroll-locked');
+    body.classList.add('cv-scroll-locked');
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+}
+
+function _cvUnlockBodyScroll() {
+    if (_cvBodyOverflowBefore === null) return;
+    const html = document.documentElement;
+    const body = document.body;
+    html.classList.remove('cv-scroll-locked');
+    body.classList.remove('cv-scroll-locked');
+    html.style.overflow = _cvHtmlOverflowBefore || '';
+    body.style.overflow = _cvBodyOverflowBefore || '';
+    _cvHtmlOverflowBefore = null;
+    _cvBodyOverflowBefore = null;
+}
+
+function _cvSyncVisualViewport() {
+    const overlay = document.getElementById('chatvault_overlay');
+    if (!overlay) return;
+    if (!isMobileLayout()) {
+        overlay.style.removeProperty('--cv-vv-h');
+        overlay.style.removeProperty('--cv-vv-top');
+        return;
+    }
+    const vv = window.visualViewport;
+    const h = Math.round(vv ? vv.height : window.innerHeight);
+    const top = Math.round(vv ? Math.max(0, vv.offsetTop) : 0);
+    overlay.style.setProperty('--cv-vv-h', `${h}px`);
+    overlay.style.setProperty('--cv-vv-top', `${top}px`);
+}
+
+function _cvScheduleVisualViewportSync() {
+    if (_cvVVFrame) return;
+    _cvVVFrame = requestAnimationFrame(() => {
+        _cvVVFrame = 0;
+        _cvSyncVisualViewport();
+    });
+}
+
+function _cvBindViewportSync(overlay) {
+    if (!overlay) return;
+    _cvSyncVisualViewport();
+    if (!isMobileLayout()) return;
+    const vv = window.visualViewport;
+    const onChange = () => _cvScheduleVisualViewportSync();
+    if (vv) {
+        vv.addEventListener('resize', onChange);
+        vv.addEventListener('scroll', onChange, { passive: true });
+    }
+    window.addEventListener('orientationchange', onChange);
+    window.addEventListener('resize', onChange);
+    overlay._cvViewportCleanup = () => {
+        if (vv) {
+            vv.removeEventListener('resize', onChange);
+            vv.removeEventListener('scroll', onChange);
+        }
+        window.removeEventListener('orientationchange', onChange);
+        window.removeEventListener('resize', onChange);
+        if (_cvVVFrame) { cancelAnimationFrame(_cvVVFrame); _cvVVFrame = 0; }
+        overlay.style.removeProperty('--cv-vv-h');
+        overlay.style.removeProperty('--cv-vv-top');
+    };
+}
+
+function _cvCleanupViewportSync(overlay) {
+    if (overlay && overlay._cvViewportCleanup) {
+        overlay._cvViewportCleanup();
+        overlay._cvViewportCleanup = null;
+    }
+}
+
+/* 桌面窗口被拖窄 / 平板分屏变成手机尺寸时，桌面窗口模式写在 panel 上的内联尺寸
+ * 是 style="...!important" 级别，会压过移动端 CSS。这里在跨过断点时把它们清掉，
+ * 把布局控制权交还给 style.css 的手机层。 */
+function _cvEnsureMobileCssOwnership(overlay, panel) {
+    if (!overlay || !panel || !isMobileLayout()) return;
+    overlay.classList.remove('cv-window-positioned', 'cv-window-free', 'cv-reader-expanded');
+    ['left', 'top', 'width', 'height', 'transform', 'transform-origin'].forEach(p => panel.style.removeProperty(p));
+    panel.classList.remove('cv-window-positioned');
+}
+
+/* 手机底部抽屉：从顶部把手/标题区下拉关闭
+ *  - 只认触屏指针（pointerType !== 'mouse'），桌面完全不受影响
+ *  - 只有起始点落在抽屉顶部 60px 内才接管，正文/表单区域依然正常滚动
+ *  - 下拉超过 72px 视为关闭：弹窗走 closeModal()，阅读设置走齿轮按钮（复用既有收尾逻辑） */
+function _cvBindSheetDragDismiss(overlay) {
+    let drag = null;
+    const onDown = (e) => {
+        if (!isMobileLayout() || e.pointerType === 'mouse') return;
+        const sheet = e.target.closest('.cv-modal, .cv-reader-settings');
+        if (!sheet) return;
+        if (e.target.closest('button, input, select, textarea, a, .cv-modal-body, .cv-reader-settings-body')) return;
+        const r = sheet.getBoundingClientRect();
+        if (e.clientY - r.top > 60) return;
+        drag = {
+            id: e.pointerId,
+            y: e.clientY,
+            dy: 0,
+            sheet,
+            kind: sheet.classList.contains('cv-reader-settings') ? 'reader' : 'modal',
+        };
+        sheet.style.transition = 'none';
+        sheet.style.willChange = 'transform';
+    };
+    const onMove = (e) => {
+        if (!drag || e.pointerId !== drag.id) return;
+        drag.dy = Math.max(0, e.clientY - drag.y);
+        drag.sheet.style.transform = `translateY(${drag.dy}px)`;
+    };
+    const finish = (e) => {
+        if (!drag || (e && e.pointerId !== drag.id)) return;
+        const { sheet, dy, kind } = drag;
+        drag = null;
+        sheet.style.transition = '';
+        sheet.style.willChange = '';
+        if (dy > 72) {
+            if (kind === 'reader') {
+                document.getElementById('cv_reader_gear')?.click();
+            } else {
+                closeModal();
+                return;
+            }
+        }
+        sheet.style.transform = '';
+    };
+    overlay.addEventListener('pointerdown', onDown, { passive: true });
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerup', finish, { passive: true });
+    window.addEventListener('pointercancel', finish, { passive: true });
+    // 关闭面板时必须解绑 window 级监听器（遵守“关闭面板 = 关闭一切监听器”）
+    overlay._cvSheetDragCleanup = () => {
+        overlay.removeEventListener('pointerdown', onDown);
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', finish);
+        if (drag && drag.sheet) {
+            drag.sheet.style.transition = '';
+            drag.sheet.style.willChange = '';
+            drag.sheet.style.transform = '';
+        }
+        drag = null;
+    };
+}
+
 function openPanel(modeOverride = '') {
     if (panelEl) {
         const panel = document.getElementById('chatvault_panel');
@@ -822,7 +987,9 @@ function openPanel(modeOverride = '') {
                     <h1>聊天档案<span class="cv-snapshot-dot" id="cv_snapshot_dot" title="当前显示快照 · 点右上角刷新键同步最新"></span></h1>
                 </div>
                 <div class="cv-search-wrap">
-                    <input type="text" class="cv-search" id="cv_search" placeholder="搜索角色名 / 聊天标题 / 标签…" />
+                    <input type="search" inputmode="search" enterkeyhint="search"
+                           autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+                           class="cv-search" id="cv_search" placeholder="搜索角色名 / 聊天标题 / 标签…" />
                 </div>
                 <div class="cv-header-actions">
                     <button class="cv-icon-btn cv-refresh-btn" id="cv_refresh" title="手动刷新（重新加载所有角色和聊天）">${ICONS.refresh}</button>
@@ -847,14 +1014,38 @@ function openPanel(modeOverride = '') {
     panelEl.addEventListener('click', (e) => {
         // 拖动/拉伸刚结束时浏览器可能补一个 click 到遮罩上，忽略掉防止误关
         if (_cvSuppressOverlayClick) return;
+        // 点在面板内部不当成“点遮罩”
+        if (e.target.closest && e.target.closest('#chatvault_panel')) return;
         closePanel();
     });
+    // v0.6.0：面板/弹窗内部点击不要冒泡到遮罩。
+    // 原来靠每个容器的内联 onclick="event.stopPropagation()"；万一酒馆收紧 CSP
+    // 丢掉内联事件，点面板任何位置都会直接关掉面板。这里补真实监听器兜底。
+    panelEl.querySelector('#chatvault_panel')?.addEventListener('click', (e) => e.stopPropagation());
     document.body.appendChild(panelEl);
+
+    // v0.6.0 手机适配：跟随视觉视口（软键盘 / 地址栏高度）
+    _cvBindViewportSync(panelEl);
 
     // 桌面窗口模式：装把手、还原位置、绑定拖拽/拉伸（手机端内部直接 return）
     const _panel = document.getElementById('chatvault_panel');
     applyWindowState(panelEl, _panel, modeOverride);
     initWindowChrome(panelEl, _panel);
+    // v0.6.0：窗口跨过手机断点时清掉桌面内联尺寸
+    _cvEnsureMobileCssOwnership(panelEl, _panel);
+    panelEl._cvMobileSwitchHandler = () => _cvEnsureMobileCssOwnership(panelEl, _panel);
+    window.addEventListener('resize', panelEl._cvMobileSwitchHandler);
+
+    // v0.6.0：锁背景滚动。
+    //  - 手机端面板是全屏的，一律锁；
+    //  - 桌面「经典居中弹窗」也锁（避免滚轮滚到背后的酒馆页面）；
+    //  - 桌面「自由窗口 / 左侧停靠栏」的设计目的就是“不遮罩、可同时操作酒馆”，
+    //    这两种模式绝不能锁，否则用户滚不动酒馆。
+    if (isMobileLayout() || !panelEl.classList.contains('cv-window-free')) {
+        _cvLockBodyScroll();
+    }
+    // 手机底部抽屉：下拉把手关闭
+    _cvBindSheetDragDismiss(panelEl);
 
     document.getElementById('cv_close').onclick = closePanel;
     document.getElementById('cv_refresh').onclick = (e) => {
@@ -864,11 +1055,40 @@ function openPanel(modeOverride = '') {
         btn.classList.add('is-spinning');
         loadAll().finally(() => btn.classList.remove('is-spinning'));
     };
-    document.getElementById('cv_search').oninput = (e) => {
-        searchQuery = e.target.value.trim();
-        currentPage = 1;
-        render();
-    };
+    // v0.6.0：中文输入法适配 + 输入去抖
+    // 旧实现每敲一个字符就整页重渲（最多 50 张卡 + 高亮 + 预览观察器）。
+    // 手机上 IME 拼字期间 input 事件会连续触发，输入“长夜”就会重绘两三次，
+    // 低端机直接卡顿、候选词还会被重绘顶掉。这里 composition 期间不渲染，结束后再渲。
+    (() => {
+        const el = document.getElementById('cv_search');
+        if (!el) return;
+        let composing = false;
+        let timer = 0;
+        const apply = () => {
+            if (!document.getElementById('chatvault_panel')) return;
+            searchQuery = el.value.trim();
+            currentPage = 1;
+            render();
+            // 搜索结果变少时滚回顶部，否则会停在空白区，看起来像“没结果”
+            const body = document.getElementById('cv_body');
+            if (body) body.scrollTop = 0;
+        };
+        el.addEventListener('compositionstart', () => { composing = true; });
+        el.addEventListener('compositionend', () => {
+            composing = false;
+            clearTimeout(timer);
+            timer = setTimeout(apply, 0);
+        });
+        el.addEventListener('input', () => {
+            if (composing) return;
+            clearTimeout(timer);
+            timer = setTimeout(apply, 120);
+        });
+        el.addEventListener('search', () => {           // 键盘“搜索”键 / 清理按钮
+            clearTimeout(timer);
+            apply();
+        });
+    })();
     document.getElementById('cv_tabs').addEventListener('click', (e) => {
         const btn = e.target.closest('.cv-tab');
         if (!btn) return;
@@ -921,6 +1141,17 @@ function closePanel() {
         window.removeEventListener('resize', panelEl._cvOnResize);
         panelEl._cvOnResize = null;
     }
+    // v0.6.0 手机适配：清掉视觉视口监听 + 解除背景滚动锁
+    if (panelEl && panelEl._cvMobileSwitchHandler) {
+        window.removeEventListener('resize', panelEl._cvMobileSwitchHandler);
+        panelEl._cvMobileSwitchHandler = null;
+    }
+    if (panelEl && panelEl._cvSheetDragCleanup) {
+        panelEl._cvSheetDragCleanup();
+        panelEl._cvSheetDragCleanup = null;
+    }
+    _cvCleanupViewportSync(panelEl);
+    _cvUnlockBodyScroll();
     if (panelEl) { panelEl.remove(); panelEl = null; }
     document.removeEventListener('keydown', escHandler);
     // 重置阅读模式状态——否则下次打开 render() 会因为 readerState.active=true 直接进入旧阅读视图
@@ -932,6 +1163,8 @@ function closePanel() {
     // 关闭面板时清空搜索词，避免下次打开时旧搜索仍然生效但输入框为空
     searchQuery = '';
     currentPage = 1;
+    // v0.6.0：阅读模式临时展开的几何记录也必须清掉，否则下次打开会还原成旧尺寸
+    _readerPanelBeforeExpand = null;
 }
 
 function switchTab(tab) {
@@ -942,6 +1175,9 @@ function switchTab(tab) {
         b.classList.toggle('active', b.dataset.tab === tab);
     });
     render();
+    // v0.6.0：切 Tab 后回到顶部，否则会停在上一页的滚动位置（手机上像“空白页”）
+    const body = document.getElementById('cv_body');
+    if (body) body.scrollTop = 0;
 }
 
 function setStatus(text) {
@@ -1384,11 +1620,11 @@ function renderCard(character, chat, hideCharName = false) {
                         ${subLine}
                     </div>
                     <div class="cv-actions">
-                        <button class="cv-act cv-star ${starred ? 'is-on' : ''}" data-act="star" title="收藏">${ICONS.star}</button>
-                        <button class="cv-act" data-act="edit" title="编辑标题/标签">${ICONS.edit}</button>
-                        <button class="cv-act cv-act-delete" data-act="delete" title="删除">${ICONS.trash}</button>
+                        <button class="cv-act cv-star ${starred ? 'is-on' : ''}" data-act="star" title="收藏" aria-label="${starred ? '取消收藏' : '收藏'}">${ICONS.star}</button>
+                        <button class="cv-act" data-act="edit" title="编辑标题/标签" aria-label="编辑标题和标签">${ICONS.edit}</button>
+                        <button class="cv-act cv-act-delete" data-act="delete" title="删除" aria-label="删除这个聊天">${ICONS.trash}</button>
                         <span class="cv-act-divider"></span>
-                        <button class="cv-act cv-act-jump ${active ? 'is-active' : ''}" data-act="open" title="跳转到此聊天"><span>${jumpLabel}</span>${ICONS.jump}</button>
+                        <button class="cv-act cv-act-jump ${active ? 'is-active' : ''}" data-act="open" title="跳转到此聊天" aria-label="${jumpLabel}聊天"><span>${jumpLabel}</span>${ICONS.jump}</button>
                     </div>
                 </div>
                 <div class="cv-meta-row">
@@ -1504,6 +1740,13 @@ function closePreviewTip() {
 }
 
 function positionPreviewTip(tip, anchorEl) {
+    // v0.6.0：手机端预览气泡由 CSS 固定为底部卡片，不需要也不应该写内联坐标
+    // （内联坐标要靠 !important 才能被压住，太脆；同时也省掉一次强制同步布局）
+    if (isMobileLayout()) {
+        tip.style.removeProperty('left');
+        tip.style.removeProperty('top');
+        return;
+    }
     const anchor = anchorEl.getBoundingClientRect();
     const rect = tip.getBoundingClientRect();
     const vw = window.innerWidth || document.documentElement.clientWidth || 1;
@@ -2038,6 +2281,7 @@ function exitReader() {
     const panel = document.getElementById('chatvault_panel');
     if (panel) {
         panel.classList.remove('cv-in-reader');
+        panel.classList.remove('cv-reader-settings-open');
         restoreReaderPanelExpand(panel);
     }
     render();
@@ -2295,6 +2539,9 @@ function bindReaderHeader() {
             readerState.settingsOpen = !!open;
             panel.hidden = !open;
             gear.classList.toggle('is-on', !!open);
+            // v0.6.0：手机端设置面板是底部抽屉，给面板加个 class 让 CSS 把正文压暗，
+            // 抽屉和正文才有层次（纯 CSS 无法根据子元素状态给兄弟元素上样式）
+            document.getElementById('chatvault_panel')?.classList.toggle('cv-reader-settings-open', !!open);
             // v0.3.23-test: 设置面板打开时把分页器藏起来，避免与设置面板底部重叠
             if (pagerWrap) pagerWrap.classList.toggle('cv-pager-suppressed', !!open);
             if (open) renderReaderSettings(panel);
@@ -2322,12 +2569,14 @@ function bindReaderHeader() {
                 const y = stage.scrollTop;
                 const dy = y - lastY;
                 lastY = y;
-                if (Math.abs(dy) < 2) return;
+                // v0.6.0：触屏的惯性滚动会持续产生 1~3px 的抖动，阈值太小会让悬浮条
+                // 在阅读时反复闪现。抬高阈值 + 加大底部/顶部保护区，只对“明显滚动”响应。
+                if (Math.abs(dy) < 5) return;
                 acc = (Math.sign(dy) === Math.sign(acc)) ? acc + dy : dy;
-                if (acc > 24)       { hide(); acc = 0; }
-                else if (acc < -24) { show(); acc = 0; }
-                if (stage.scrollHeight - y - stage.clientHeight < 80) show();
-                if (y < 40) show();
+                if (acc > 40)       { hide(); acc = 0; }
+                else if (acc < -40) { show(); acc = 0; }
+                if (stage.scrollHeight - y - stage.clientHeight < 120) show();
+                if (y < 48) show();
             }, { passive: true });
         } else {
             overlays.forEach(el => el.classList.remove('is-hidden'));
@@ -2354,7 +2603,66 @@ function bindReaderPager(totalPages) {
     const inp = document.getElementById('cv_pager_input');
     const goBtn = document.getElementById('cv_pager_go');
     if (goBtn) goBtn.onclick = () => goTo(inp?.value);
-    if (inp) inp.onkeydown = (e) => { if (e.key === 'Enter') goTo(inp.value); };
+    if (inp) {
+        inp.onkeydown = (e) => { if (e.key === 'Enter') goTo(inp.value); };
+        // v0.6.0：手机数字键盘不一定有回车键，离开输入框 / 点击上下箭头也要生效
+        let lastCommitted = String(readerState.page);
+        const commit = () => {
+            if (!inp.isConnected) return;
+            const v = String(inp.value).trim();
+            if (!v || v === lastCommitted) return;
+            lastCommitted = v;
+            goTo(v);
+        };
+        inp.onchange = commit;
+        inp.onblur = commit;
+    }
+    bindReaderSwipe(totalPages, goTo);
+}
+
+/* v0.6.0 手机专属：左右滑动翻页
+ *  - 只在触屏指针下生效（pointerType !== 'mouse'），桌面行为完全不变
+ *  - 必须横滑足够远（>64px）且明显比竖滑更横（>2 倍），否则让给纵向滚动
+ *  - 起始点落在按钮/输入框/表格/代码块里时直接放弃，避免抢走交互
+ *  - 正在选中文字时也放弃，避免“想选字结果翻页”
+ */
+function bindReaderSwipe(totalPages, goTo) {
+    const stage = document.querySelector('.cv-reader-stage');
+    if (!stage || totalPages <= 1) return;
+    if (stage._cvSwipeBound) return;
+    stage._cvSwipeBound = true;
+    const DEAD_X = 64;
+    let startX = 0, startY = 0, tracking = false, moved = false;
+    const onDown = (e) => {
+        if (e.pointerType === 'mouse') return;
+        if (e.target.closest('input, textarea, select, button, a, .cv-md-table, .cv-md-pre')) return;
+        tracking = true;
+        moved = false;
+        startX = e.clientX;
+        startY = e.clientY;
+    };
+    const onMove = (e) => {
+        if (!tracking) return;
+        if (Math.abs(e.clientX - startX) > 12 || Math.abs(e.clientY - startY) > 12) moved = true;
+    };
+    const onUp = (e) => {
+        if (!tracking) return;
+        tracking = false;
+        if (e.pointerType === 'mouse') return;
+        if (!moved) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (Math.abs(dx) < DEAD_X) return;
+        if (Math.abs(dx) < Math.abs(dy) * 2) return;
+        if (window.getSelection && String(window.getSelection() || '').length > 0) return;
+        goTo(readerState.page + (dx < 0 ? 1 : -1));
+    };
+    const onCancel = () => { tracking = false; moved = false; };
+    stage.addEventListener('pointerdown', onDown, { passive: true });
+    stage.addEventListener('pointermove', onMove, { passive: true });
+    stage.addEventListener('pointerup', onUp, { passive: true });
+    stage.addEventListener('pointercancel', onCancel, { passive: true });
+    // 每次 renderReader 都会重建 stage，监听器随节点一起回收，无需手动解绑
 }
 
 /* —— v0.4.4 书签入口：唯一入口 = 点击楼层号；不再监听任何长按 / 右键 —— */
@@ -2404,18 +2712,20 @@ function openMsgMenu(msgEl, x, y) {
     `;
     // 挂在 chatvault_panel 内部，才能继承 .cv-theme-* 配色变量；落到 body 会变黑块
     (document.getElementById('chatvault_panel') || document.body).appendChild(menu);
-    const rect = menu.getBoundingClientRect();
-    const vw = window.innerWidth, vh = window.innerHeight;
-    let left = x, top = y;
-    if (left + rect.width > vw - 8) left = Math.max(8, vw - rect.width - 8);
-    // 优先放在下方；下方放不下且上方更宽敞时放上方
-    if (top + rect.height > vh - 8) {
-        const above = y - rect.height - 8;
-        if (above >= 8) top = above;
-        else top = Math.max(8, vh - rect.height - 8);
+    if (!isMobileLayout()) {
+        const rect = menu.getBoundingClientRect();
+        const vw = window.innerWidth, vh = window.innerHeight;
+        let left = x, top = y;
+        if (left + rect.width > vw - 8) left = Math.max(8, vw - rect.width - 8);
+        // 优先放在下方；下方放不下且上方更宽敞时放上方
+        if (top + rect.height > vh - 8) {
+            const above = y - rect.height - 8;
+            if (above >= 8) top = above;
+            else top = Math.max(8, vh - rect.height - 8);
+        }
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
     }
-    menu.style.left = left + 'px';
-    menu.style.top = top + 'px';
     menu.querySelectorAll('button').forEach(b => {
         b.onclick = (e) => {
             e.stopPropagation();
@@ -2525,7 +2835,9 @@ function openFloorJumpModal(mode, defaultIdx) {
     `;
     wrap.onclick = closeModal;
     document.getElementById('chatvault_panel').appendChild(wrap);
-    setTimeout(() => { const i = document.getElementById('cv_floor_jump_input'); if (i) { i.focus(); i.select(); } }, 0);
+    // v0.6.0：手机弹窗是底部抽屉，自动聚焦会立刻弹出键盘、把抽屉挤小；
+    // 桌面端保持原来的“打开即可输入”。
+    if (!isMobileLayout()) setTimeout(() => { const i = document.getElementById('cv_floor_jump_input'); if (i) { i.focus(); i.select(); } }, 0);
     document.getElementById('cv_floor_jump_close').onclick = closeModal;
     document.getElementById('cv_floor_jump_cancel').onclick = closeModal;
     const go = () => {
@@ -2580,7 +2892,7 @@ function openBookmarkModal(idx, existing) {
     `;
     wrap.onclick = closeModal;
     document.getElementById('chatvault_panel').appendChild(wrap);
-    setTimeout(() => { const i = document.getElementById('cv_bm_note'); if (i) { i.focus(); i.select(); } }, 0);
+    if (!isMobileLayout()) setTimeout(() => { const i = document.getElementById('cv_bm_note'); if (i) { i.focus(); i.select(); } }, 0);
     document.getElementById('cv_bm_close').onclick = closeModal;
     document.getElementById('cv_bm_cancel').onclick = closeModal;
     const save = () => {
@@ -3867,7 +4179,7 @@ function renderOrganizerBody(wrap, state, character, fileName) {
         const name = getOrganizerMessageName(row.msg, character, state.meta);
         const preview = cleanOrganizerPreview(row.msg?.mes);
         return `
-            <div class="cv-organizer-row${selectedClass}${draggingClass}${dropClass}" data-i="${i}" draggable="true">
+            <div class="cv-organizer-row${selectedClass}${draggingClass}${dropClass}" data-i="${i}" draggable="${isMobileLayout() ? 'false' : 'true'}">
                 <label class="cv-organizer-check" title="选择这一楼">
                     <input type="checkbox" ${state.selectedIds.has(row.id) ? 'checked' : ''} />
                 </label>
@@ -3900,7 +4212,7 @@ function renderOrganizerBody(wrap, state, character, fileName) {
             <button class="cv-organizer-help-toggle${state.helpOpen ? ' is-open' : ''}" id="cv_org_help" type="button" aria-expanded="${state.helpOpen ? 'true' : 'false'}" title="整理说明">?</button>
             <span>整理说明</span>
         </div>
-        <div class="cv-organizer-warning" id="cv_org_help_body" ${state.helpOpen ? '' : 'hidden'}>整理结果只在弹窗内预览。写回前请先“备份原文件”，再点“保存更改”；保存时会二次确认并验证覆盖结果。当前页可拖拽，跨页请用“移动到第 N 层”。</div>
+        <div class="cv-organizer-warning" id="cv_org_help_body" ${state.helpOpen ? '' : 'hidden'}>整理结果只在弹窗内预览。写回前请先“备份原文件”，再点“保存更改”；保存时会二次确认并验证覆盖结果。${isMobileLayout() ? '当前页请用「上移 / 下移 / 移动到第 N 层」按钮调整顺序（手机不支持拖拽），跨页同样用「移动到第 N 层」。' : '当前页可拖拽，跨页请用“移动到第 N 层”。'}</div>
         <div class="cv-organizer-range">
             <span>选择</span>
             <input id="cv_org_start" type="number" min="0" max="${Math.max(0, currentCount - 1)}" placeholder="起始" />
@@ -4246,7 +4558,9 @@ function openEditModal(character, fileName) {
     `;
     wrap.onclick = closeModal;
     document.getElementById('chatvault_panel').appendChild(wrap);
-    setTimeout(() => document.getElementById('cv_m_title').focus(), 0);
+    // v0.6.0：手机端不自动聚焦——否则一打开弹窗软键盘就弹出来，
+    // 把刚变成底部抽屉的弹窗顶掉一半，用户还得先收键盘才能看清内容。
+    if (!isMobileLayout()) setTimeout(() => document.getElementById('cv_m_title')?.focus(), 0);
 
     document.getElementById('cv_m_close').onclick = closeModal;
     document.getElementById('cv_m_cancel').onclick = closeModal;
@@ -4704,8 +5018,18 @@ function applyWelcomeButtonState() {
 
 let _cvSuppressOverlayClick = false;
 
+/* v0.6.0 手机判定
+ * 旧版只认 matchMedia('(max-width: 720px)')，导致横屏手机（如 844x390）被当成桌面：
+ * 会装上拖拽/拉伸把手、左侧停靠条、还原成 1100px 桌面弹窗 —— 在手机上没法用。
+ * 现在与 style.css 的断点严格保持一致（两处必须同步改）：
+ *      (max-width: 720px)  或  (orientation: landscape) and (max-height: 560px)
+ * 「触屏专用」的视觉补丁不在这里判断，交给 CSS 的 @media (hover: none), (pointer: coarse)。
+ */
 function isMobileLayout() {
-    return !!(window.matchMedia && window.matchMedia('(max-width: 720px)').matches);
+    if (!window.matchMedia) return false;
+    if (window.matchMedia('(max-width: 720px)').matches) return true;
+    if (window.matchMedia('(orientation: landscape) and (max-height: 560px)').matches) return true;
+    return false;
 }
 
 /* ----- 桌面尺寸模式：用真实宽高替代 transform: scale ----- */
@@ -4736,11 +5060,15 @@ function getDesktopPanelMode(s = loadSettings(), overrideMode = '') {
 function getDefaultPanelBox(mode = getDesktopPanelMode()) {
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
-    const maxW = Math.max(CV_PANEL_MIN_W, vw - CV_PANEL_MARGIN * 2);
-    const maxH = Math.max(CV_PANEL_MIN_H, vh - CV_PANEL_MARGIN * 2);
+    // v0.6.0 fix: 视口比最小尺寸还小时，原来 Math.max(MIN, ...) 会把 max 抬高到 MIN，
+    // 结果面板比屏幕还大（矮窗口/分屏/平板上下分屏时底部按钮点不到）。这里以“视口”为硬上限。
+    const maxW = Math.max(1, vw - CV_PANEL_MARGIN * 2);
+    const maxH = Math.max(1, vh - CV_PANEL_MARGIN * 2);
+    const minW = Math.min(CV_PANEL_MIN_W, maxW);
+    const minH = Math.min(CV_PANEL_MIN_H, maxH);
     if (mode === 'dock') {
-        const w = Math.min(CV_PANEL_DOCK_W, maxW);
-        const h = maxH;
+        const w = _clamp(Math.min(CV_PANEL_DOCK_W, maxW), minW, maxW);
+        const h = _clamp(maxH, minH, maxH);
         return { x: CV_PANEL_MARGIN, y: CV_PANEL_MARGIN, w, h };
     }
     const w = Math.min(CV_PANEL_MODAL_W, Math.round(vw * 0.95), maxW);
@@ -4773,10 +5101,13 @@ function applyPanelModeClasses(overlay, panel, mode) {
 function clampPanelBox(box) {
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
-    const maxW = Math.max(CV_PANEL_MIN_W, vw - CV_PANEL_MARGIN * 2);
-    const maxH = Math.max(CV_PANEL_MIN_H, vh - CV_PANEL_MARGIN * 2);
-    const w = _clamp(Math.round(_num(box.w, CV_PANEL_MODAL_W)), CV_PANEL_MIN_W, maxW);
-    const h = _clamp(Math.round(_num(box.h, CV_PANEL_MODAL_H)), CV_PANEL_MIN_H, maxH);
+    // v0.6.0 fix: 视口比最小尺寸还小时，min 不能大于上限，否则面板会超出屏幕（矮窗口/分屏）
+    const maxW = Math.max(1, vw - CV_PANEL_MARGIN * 2);
+    const maxH = Math.max(1, vh - CV_PANEL_MARGIN * 2);
+    const minW = Math.min(CV_PANEL_MIN_W, maxW);
+    const minH = Math.min(CV_PANEL_MIN_H, maxH);
+    const w = _clamp(Math.round(_num(box.w, CV_PANEL_MODAL_W)), minW, maxW);
+    const h = _clamp(Math.round(_num(box.h, CV_PANEL_MODAL_H)), minH, maxH);
     const xMax = Math.max(CV_PANEL_MARGIN, vw - w - CV_PANEL_MARGIN);
     const yMax = Math.max(CV_PANEL_MARGIN, vh - h - CV_PANEL_MARGIN);
     const x = _clamp(Math.round(_num(box.x, CV_PANEL_MARGIN)), CV_PANEL_MARGIN, xMax);
@@ -5154,7 +5485,7 @@ function injectSettings() {
               <span>在欢迎页底部显示快捷按钮（与 API 连接 / 角色管理 / 扩展程序 同排）</span>
             </label>
           </div>
-          <div class="cv-settings-row">
+          <div class="cv-settings-row cv-pc-only">
             <label class="checkbox_label" for="cv_set_left_dock_btn">
               <input type="checkbox" id="cv_set_left_dock_btn" ${s.leftDockButton !== false ? 'checked' : ''}>
               <span>启用侧边栏入口按钮（仅 PC 端）</span>
@@ -5211,7 +5542,7 @@ function injectSettings() {
           </div>
 
           <!-- PC 端窗口设置（折叠，默认收起防止手机端误触） -->
-          <div class="inline-drawer cv-sub-drawer">
+          <div class="inline-drawer cv-sub-drawer cv-pc-only">
             <div class="inline-drawer-toggle inline-drawer-header">
               <b>PC 端窗口设置（手机端无效）</b>
               <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
@@ -5552,7 +5883,9 @@ jQuery(async () => {
         const needBtn = cur.enabled && !document.getElementById('chatvault_open_btn');
         const needSet = !document.getElementById('chatvault_settings');
         const needWelcomeObs = cur.welcomeButton && !_cvWelcomeObserver;
-        const needDockTab = cur.leftDockButton && !document.getElementById('chatvault_dock_tab');
+        // v0.6.0: 手机上永远注入不了侧边栏按钮，旧逻辑会让 needDockTab 一直 true
+        // → 空转 60 次 / 30 秒的轮询。这里直接把手机关掉。
+        const needDockTab = cur.leftDockButton && !isMobileLayout() && !document.getElementById('chatvault_dock_tab');
         if (needBtn || needSet || needWelcomeObs || needDockTab) {
             if (++_injectTries < INJECT_MAX_TRIES) {
                 setTimeout(tryInject, 500);
