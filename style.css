@@ -141,7 +141,7 @@
 #chatvault_overlay {
     position: fixed !important;
     inset: 0 !important;
-    width: 100vw !important;
+    width: 100% !important;
     height: 100vh !important;
     height: 100dvh !important; /* 手机浏览器：扣掉地址栏 */
     background: var(--cv-bg-overlay);
@@ -2420,6 +2420,8 @@
 .cv-color-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    row-gap: 6px;
     gap: 8px;
     padding: 6px 8px;
     border: 1px solid rgba(127, 127, 127, 0.18);
@@ -2929,3 +2931,1034 @@
     -webkit-tap-highlight-color: rgba(0,0,0,0.05);
     touch-action: manipulation;
 }
+
+/* ============================================================
+ * v0.6.0  手机 / 触屏适配层
+ * ------------------------------------------------------------
+ *  断点刻意与 JS 的 isMobileLayout() 完全一致：
+ *      (max-width: 720px)  或  (orientation: landscape) and (max-height: 560px)
+ *  → 竖屏手机、横屏手机（如 844x390）都进入手机布局；
+ *    平板（768 宽竖屏）仍用桌面布局，只吃「触屏补丁」。
+ *  ⚠️ 本段必须留在文件最后：前面有大量 !important 和 @media(min-width:721px) 桌面规则。
+ *
+ *  分层：
+ *    0. 通用触屏补丁（所有触屏设备）
+ *    1. 手机外壳：满屏面板 / 两行 Header / 大按钮 / 安全区
+ *    2. 列表卡片：可点区域、触控按钮尺寸、折叠区
+ *    3. 弹窗：底部抽屉（bottom sheet）+ 键盘友好
+ *    4. 阅读模式：FAB / 分页器 / 设置抽屉 / 正文
+ *    5. 楼层整理器 / 消息菜单 / 预览气泡
+ *    6. 扩展设置页
+ *    7. 横屏手机专项
+ * ============================================================ */
+
+/* ---------- 0. 通用触屏补丁 ---------- */
+
+/* 面板打开期间锁住背景页面滚动（JS 给 body 加这个 class + 内联 overflow:hidden，
+   这里再用 !important 兜底，防止酒馆主题把 body overflow 改回 auto） */
+body.cv-scroll-locked {
+    overflow: hidden !important;
+    overscroll-behavior: none;
+}
+
+#chatvault_panel,
+#chatvault_overlay,
+#chatvault_dock_tab,
+#chatvault_open_btn {
+    -webkit-tap-highlight-color: transparent;
+}
+#chatvault_panel button,
+#chatvault_panel .cv-card-main,
+#chatvault_panel label,
+#chatvault_panel input,
+#chatvault_panel select,
+#chatvault_panel textarea,
+#chatvault_panel a,
+#chatvault_dock_tab {
+    /* 去掉双击缩放带来的 300ms 延迟，点按更跟手 */
+    touch-action: manipulation;
+}
+
+/* 触屏设备没有稳定的 hover：悬停态会“粘”在刚点过的元素上，改用 :active 反馈 */
+@media (hover: none), (pointer: coarse) {
+    #chatvault_panel .cv-actions { opacity: 1; }
+
+    #chatvault_panel .cv-card:hover {
+        background: var(--cv-bg-card);
+        border-color: transparent;
+    }
+    #chatvault_panel .cv-card.is-active:hover {
+        background: var(--cv-active-bg, color-mix(in srgb, var(--cv-accent, #6e8efb) 8%, transparent));
+        border-color: transparent;
+    }
+    #chatvault_panel .cv-tab:hover { background: transparent; }
+    #chatvault_panel .cv-tab.active:hover { background: var(--cv-accent-muted); }
+    #chatvault_panel .cv-act:hover { background: transparent; color: var(--cv-text-secondary); }
+    #chatvault_panel .cv-act.cv-act-delete:hover { background: transparent; color: var(--cv-text-secondary); }
+    #chatvault_panel .cv-fold-btn:hover { background: var(--cv-btn-bg, rgba(255, 255, 255, 0.04)); }
+    #chatvault_panel .cv-fold-btn.cv-fold-primary:hover { filter: none; }
+    #chatvault_panel .cv-btn:hover { background: transparent; filter: none; }
+    #chatvault_panel .cv-btn.cv-btn-primary:hover,
+    #chatvault_panel .cv-btn.cv-btn-danger:hover { filter: none; }
+    #chatvault_panel .cv-icon-btn:hover { background: transparent; color: var(--cv-text-secondary); }
+    #chatvault_panel .cv-page-btn:hover:not(:disabled) { background: transparent; }
+    #chatvault_panel .cv-reader-fab:hover { background: color-mix(in srgb, var(--cv-bg-panel, #1f2230) 65%, transparent); opacity: .85; }
+    #chatvault_panel .cv-pager-btn:not(:disabled):hover { background: transparent; }
+    #chatvault_panel .cv-export-card:hover { border-color: var(--cv-border, rgba(255, 255, 255, .1)); background: var(--cv-bg-soft, rgba(255, 255, 255, .03)); }
+
+    /* 按下时的即时反馈（触屏唯一的“手感”） */
+    #chatvault_panel .cv-card-main:active { background: var(--cv-bg-card-hover); border-radius: 8px; }
+    #chatvault_panel .cv-act:active { background: rgba(127, 127, 127, 0.18); color: var(--cv-text-primary); }
+    #chatvault_panel .cv-tab:active { background: var(--cv-accent-muted); }
+    #chatvault_panel .cv-fold-btn:active { filter: brightness(0.92); }
+    #chatvault_panel .cv-btn:active { filter: brightness(0.92); }
+    #chatvault_panel .cv-icon-btn:active { background: rgba(127, 127, 127, 0.18); }
+    #chatvault_panel .cv-page-btn:active:not(:disabled) { background: var(--cv-accent-muted); }
+    #chatvault_panel .cv-reader-fab:active { transform: scale(0.94); }
+    #chatvault_panel .cv-export-card:active { border-color: var(--cv-accent); background: color-mix(in srgb, var(--cv-accent) 10%, transparent); }
+    #chatvault_panel .cv-modal-close:active { background: rgba(127, 127, 127, 0.18); }
+    #chatvault_panel .cv-pager-btn:active:not(:disabled) { background: var(--cv-accent-muted); }
+    #chatvault_panel .cv-msg-menu button:active { background: var(--cv-accent-muted); color: var(--cv-accent); }
+    #chatvault_panel .cv-organizer-row:active { background: var(--cv-bg-card-hover); }
+    /* 触屏没有拖拽手势（HTML5 DnD 不工作），别显示抓手光标误导用户 */
+    #chatvault_panel .cv-organizer-row[draggable="true"] { cursor: default; }
+    /* 触屏长按会触发原生文字选择，浮层会盖在预览气泡上；卡片区不需要选字 */
+    #chatvault_panel .cv-card-main,
+    #chatvault_panel .cv-preview {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+    /* 触屏不做平滑滚动动画：程序化跳楼层时不再“滑一段”，也不会让悬浮条闪烁 */
+    #chatvault_panel .cv-reader-stage { scroll-behavior: auto; }
+    #chatvault_panel .cv-organizer-page-btn:active:not(:disabled) { background: var(--cv-accent-muted); }
+    #chatvault_panel .cv-switch-row:active .cv-switch-track { filter: brightness(1.08); }
+}
+
+/* ============================================================
+ * 1. 手机外壳（竖屏手机 / 横屏手机）
+ * ============================================================ */
+@media (max-width: 720px), (orientation: landscape) and (max-height: 560px) {
+
+    /* —— 遮罩层：跟随视觉视口（键盘弹出时由 JS 写入 --cv-vv-*） —— */
+    #chatvault_overlay {
+        top: 0 !important;
+        top: var(--cv-vv-top, 0px) !important;
+        height: 100vh !important;
+        height: var(--cv-vv-h, 100dvh) !important;
+        max-height: 100vh !important;                   /* 老 WebView：dvh 不支持时别变成 none */
+        max-height: var(--cv-vv-h, 100dvh) !important;
+        padding: 0 !important;
+        overscroll-behavior: none;
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+    }
+
+    /* —— 面板：整屏，不再有圆角/阴影/留白 —— */
+    #chatvault_panel {
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        border-radius: 0 !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+
+    /* —— Header：第一行「标题 + 刷新/关闭」，第二行「搜索框」 —— */
+    #chatvault_panel .cv-header {
+        padding: 8px 12px 0 !important;
+        padding-top: max(8px, env(safe-area-inset-top)) !important;
+        padding-left: max(12px, env(safe-area-inset-left)) !important;
+        padding-right: max(12px, env(safe-area-inset-right)) !important;
+        gap: 6px 8px !important;
+        flex-wrap: wrap !important;
+        border-bottom: none !important;
+        min-height: 0;
+    }
+    #chatvault_panel .cv-header h1 { font-size: 17px !important; letter-spacing: 0.02em; }
+    #chatvault_panel .cv-version { font-size: 10px; }
+    #chatvault_panel .cv-search-wrap {
+        order: 3;
+        flex: 1 1 100%;
+        max-width: none;
+        margin: 0 0 2px !important;
+    }
+    /* 16px 是 iOS 不自动放大页面的下限，务必别改小 */
+    #chatvault_panel .cv-search {
+        height: 42px;
+        font-size: 16px !important;
+        padding: 0 12px 0 34px !important;
+        border-radius: 10px !important;
+    }
+    #chatvault_panel .cv-search-wrap::before { left: 12px; width: 15px; height: 15px; }
+
+    #chatvault_panel .cv-header-actions { gap: 2px; margin-left: auto; }
+    #chatvault_panel .cv-icon-btn {
+        width: 42px;
+        height: 42px;
+        padding: 0 !important;
+        border-radius: 10px;
+    }
+    #chatvault_panel .cv-icon-btn svg { width: 20px; height: 20px; }
+    #chatvault_panel .cv-refresh-btn svg { width: 20px; height: 20px; }
+
+    /* —— Tab 行：4 个 tab 等分，触控高度 ≥44 —— */
+    #chatvault_panel .cv-tabbar {
+        padding: 4px 8px 2px !important;
+        gap: 6px !important;
+        flex-wrap: wrap !important;
+    }
+    #chatvault_panel .cv-tabs {
+        flex: 1 1 100% !important;
+        gap: 4px !important;
+    }
+    #chatvault_panel .cv-tab {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 46px;
+        padding: 7px 2px !important;
+        font-size: 13px !important;
+        border-radius: 10px !important;
+        white-space: nowrap;
+    }
+    #chatvault_panel .cv-tab .cv-tab-count { font-size: 10px; margin-top: 1px; }
+
+    /* 列表分页器：手机上它是悬浮小药丸（JS 会加 cv-pagination-autohide） */
+    #chatvault_panel .cv-pagination { width: 100%; justify-content: center; }
+    #chatvault_panel .cv-pagination.cv-pagination-autohide {
+        bottom: calc(10px + env(safe-area-inset-bottom));
+        padding: 4px 8px;
+        gap: 2px;
+    }
+    #chatvault_panel .cv-page-btn { min-width: 40px; height: 40px; padding: 0 8px !important; }
+    #chatvault_panel .cv-page-btn svg { width: 16px; height: 16px; }
+    #chatvault_panel .cv-page-label { font-size: 12px; }
+
+    #chatvault_panel .cv-status {
+        padding: 0 14px 4px !important;
+        font-size: 11.5px;
+        line-height: 1.4;
+    }
+
+    /* —— 列表滚动区：底部留出悬浮分页器 + 手势条位置 —— */
+    #chatvault_panel:not(.cv-in-reader) .cv-body {
+        padding: 0 12px calc(74px + env(safe-area-inset-bottom)) !important;
+        padding-left: max(12px, env(safe-area-inset-left)) !important;
+        padding-right: max(12px, env(safe-area-inset-right)) !important;
+        overscroll-behavior-y: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    #chatvault_panel .cv-loading,
+    #chatvault_panel .cv-empty { padding: 48px 16px; font-size: 14px; }
+
+    /* —— 按角色分组 —— */
+    #chatvault_panel .cv-group { margin-top: 8px; }
+    #chatvault_panel .cv-group-header {
+        gap: 10px;
+        padding: 10px 2px 10px;
+        min-height: 56px;
+    }
+    #chatvault_panel .cv-group-name { font-size: 15px; }
+    #chatvault_panel .cv-group-avatar { width: 40px; height: 40px; }
+    #chatvault_panel .cv-group-newchat {
+        min-width: 40px;
+        min-height: 40px;
+        justify-content: center;
+        padding: 0 10px !important;
+    }
+    #chatvault_panel .cv-group-newchat svg { width: 16px; height: 16px; }
+    #chatvault_panel .cv-current-header { gap: 10px; padding: 8px 2px 10px; }
+
+    /* —— 2. 卡片 —— */
+    #chatvault_panel .cv-list { gap: 8px; }
+    #chatvault_panel:not(.cv-in-reader) .cv-card {
+        padding: 12px !important;
+        gap: 10px !important;
+        border-radius: 12px;
+    }
+    #chatvault_panel .cv-card-avatar {
+        width: 40px !important;
+        height: 40px !important;
+        margin-top: 0;
+    }
+    #chatvault_panel .cv-card-main { gap: 6px; }
+    #chatvault_panel .cv-card-row { gap: 6px; }
+    #chatvault_panel .cv-title { font-size: 15px !important; line-height: 1.35; }
+    /* v0.6.0：手机宽度下标题和 5 个操作按钮抢位置，允许标题折两行（桌面端仍单行省略） */
+    #chatvault_panel:not(.cv-in-reader) .cv-title {
+        white-space: normal !important;
+        display: -webkit-box !important;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        text-overflow: clip;
+        text-align: left;
+    }
+    #chatvault_panel .cv-active-badge { font-size: 10px; padding: 1px 5px; margin-right: 5px; }
+    #chatvault_panel .cv-character { font-size: 11.5px; }
+
+    /* 操作按钮：触屏必须够大，且整组常显（JS 里 .cv-actions 默认 opacity .55） */
+    #chatvault_panel .cv-actions {
+        opacity: 1 !important;
+        gap: 0 !important;
+        align-self: flex-start;
+        /* 只做轻微上提；不能再用负右边距，否则卡片内容会横向溢出 6px */
+        margin: -2px 0 0 0;
+    }
+    #chatvault_panel .cv-act {
+        min-width: 40px;
+        min-height: 40px;
+        padding: 0 !important;
+        border-radius: 10px;
+    }
+    #chatvault_panel .cv-act svg { width: 18px; height: 18px; }
+    #chatvault_panel .cv-act-jump {
+        min-width: 44px;
+        padding: 0 !important;
+        gap: 0;
+    }
+    #chatvault_panel .cv-act-jump span { display: none !important; }
+    #chatvault_panel .cv-act-divider { height: 18px; margin: 0 2px; }
+
+    #chatvault_panel .cv-meta-row {
+        gap: 4px 10px;
+        font-size: 11.5px;
+        line-height: 1.5;
+    }
+    #chatvault_panel .cv-meta svg { width: 12px; height: 12px; }
+    #chatvault_panel .cv-tag { font-size: 10.5px; padding: 2px 7px; }
+    #chatvault_panel .cv-preview {
+        margin-top: 2px;
+        padding-left: 8px;
+        font-size: 12.5px;
+        line-height: 1.55;
+        -webkit-line-clamp: 2;
+    }
+
+    /* 折叠区三个按钮：等宽、40px 高；负 margin 让整行横跨卡片（含头像列） */
+    #chatvault_panel .cv-card .cv-fold {
+        margin-left: -50px;          /* 头像 40 + gap 10 */
+        margin-top: 8px;
+        padding-top: 8px;
+        gap: 6px !important;
+        flex-wrap: nowrap !important;
+    }
+    #chatvault_panel .cv-fold-btn {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 42px;
+        justify-content: center;
+        padding: 6px 4px !important;
+        font-size: 12.5px !important;
+        border-radius: 10px;
+        white-space: nowrap;
+        overflow: hidden;
+    }
+    #chatvault_panel .cv-fold-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
+    #chatvault_panel .cv-fold-btn span { overflow: hidden; text-overflow: ellipsis; }
+
+    /* ============================================================
+     * 3. 弹窗 = 底部抽屉（bottom sheet）
+     * ============================================================ */
+    #chatvault_panel .cv-modal-backdrop {
+        align-items: flex-end !important;
+        justify-content: stretch !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        overflow: hidden;
+        overscroll-behavior: contain;
+    }
+    #chatvault_panel .cv-modal,
+    #chatvault_panel .cv-modal.cv-modal-wide,
+    #chatvault_panel .cv-organizer-modal {
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: 88% !important;
+        margin: 0 !important;
+        padding: 16px 14px calc(12px + env(safe-area-inset-bottom)) !important;
+        border-radius: 18px 18px 0 0 !important;
+        border-left: none !important;
+        border-right: none !important;
+        border-bottom: none !important;
+        box-shadow: 0 -10px 34px rgba(0, 0, 0, 0.32) !important;
+        overscroll-behavior: contain;
+    }
+    /* 抽屉顶部的把手，提示可下拉关闭（视觉提示，暂未绑定手势） */
+    #chatvault_panel .cv-modal::before {
+        content: '';
+        position: absolute;
+        top: 6px;
+        left: 50%;
+        width: 38px;
+        height: 4px;
+        margin-left: -19px;
+        border-radius: 2px;
+        background: var(--cv-border);
+        opacity: .85;
+        pointer-events: none;
+    }
+    #chatvault_panel .cv-modal h3 {
+        margin: 6px 0 12px !important;
+        padding-right: 34px;
+        font-size: 16px !important;
+    }
+    #chatvault_panel .cv-modal-close {
+        top: 4px;
+        right: 2px;
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+    }
+    #chatvault_panel .cv-modal-close svg { width: 20px; height: 20px; }
+    #chatvault_panel .cv-modal-body {
+        margin: 0 !important;
+        padding: 0 !important;
+        min-height: 0;
+        overscroll-behavior: contain;
+    }
+    #chatvault_panel .cv-field { margin-bottom: 12px; }
+    #chatvault_panel .cv-field label { font-size: 12.5px; margin-bottom: 5px; }
+    #chatvault_panel .cv-field input {
+        height: 46px;
+        font-size: 16px !important;   /* iOS 不放大 */
+        padding: 0 12px;
+        border-radius: 10px;
+    }
+    #chatvault_panel .cv-field-hint { font-size: 11px; line-height: 1.5; }
+    #chatvault_panel .cv-section-divider { margin: 14px 0 12px; }
+    #chatvault_panel .cv-edit-tool-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        padding: 10px;
+    }
+    #chatvault_panel .cv-edit-tool-row .cv-btn { width: 100%; min-height: 44px; }
+    #chatvault_panel .cv-modal-actions {
+        margin-top: 12px !important;
+        gap: 8px !important;
+        flex-wrap: wrap;
+    }
+    #chatvault_panel .cv-modal-actions .cv-btn {
+        flex: 1 1 0;
+        min-height: 46px;
+        font-size: 15px;
+        border-radius: 10px;
+    }
+    #chatvault_panel .cv-btn { min-height: 40px; border-radius: 9px; }
+
+    /* 导出 modal 的两个卡片：窄屏单列 */
+    #chatvault_panel .cv-export-grid { grid-template-columns: 1fr !important; gap: 10px; }
+    #chatvault_panel .cv-export-card { padding: 12px; }
+    #chatvault_panel .cv-export-card-desc { font-size: 12px; }
+
+    /* 摘取规则 / 自定义正则里的输入框统一 16px，避免 iOS 聚焦放大 */
+    #chatvault_panel .cv-strip-pair input,
+    #chatvault_panel .cv-cre-label input[type="text"],
+    #chatvault_panel .cv-ua-manual input[type="text"],
+    #chatvault_panel .cv-cc-hex {
+        font-size: 16px !important;
+        min-height: 44px;
+        padding: 8px 10px;
+    }
+    #chatvault_panel .cv-strip-del { width: 44px; height: 44px; border-radius: 9px; }
+    #chatvault_panel .cv-strip-add { min-height: 40px; font-size: 13px; }
+    #chatvault_panel .cv-collapse-head { min-height: 46px; padding: 10px 12px; }
+    #chatvault_panel .cv-switch-row { min-height: 46px; padding: 8px 2px; font-size: 13.5px; }
+    #chatvault_panel .cv-switch-track { width: 46px; height: 26px; }
+    #chatvault_panel .cv-switch-thumb { width: 22px; height: 22px; top: 2px; left: 2px; }
+    #chatvault_panel .cv-switch input:checked + .cv-switch-track .cv-switch-thumb { transform: translateX(20px); }
+    /* 触屏上扩大开关的可点范围：整行都能点（label 已绑定） */
+
+    /* ============================================================
+     * 4. 阅读模式
+     * ============================================================ */
+    #chatvault_panel.cv-in-reader .cv-body {
+        padding: 0 !important;
+        overscroll-behavior: contain;
+    }
+    #chatvault_panel .cv-reader-stage {
+        overscroll-behavior: contain;
+        /* 手机无占位滚动条，两侧对称留白（原规则是为桌面滚轴校正的） */
+        scrollbar-gutter: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    #chatvault_panel .cv-reader-column {
+        max-width: 100% !important;
+        padding: max(58px, calc(env(safe-area-inset-top) + 46px)) 16px 0 !important;
+        /* 横屏刘海在左右两侧：正文左右也要让开，否则首尾字被挖孔盖住 */
+        padding-left: max(16px, env(safe-area-inset-left)) !important;
+        padding-right: max(16px, env(safe-area-inset-right)) !important;
+    }
+    #chatvault_panel .cv-reader-fab {
+        width: 42px;
+        height: 42px;
+        top: max(10px, calc(env(safe-area-inset-top) + 4px));
+        opacity: .92;
+    }
+    #chatvault_panel .cv-reader-fab svg { width: 19px; height: 19px; }
+    #chatvault_panel .cv-reader-fab-back { left: max(10px, env(safe-area-inset-left)); }
+    #chatvault_panel .cv-reader-fab-gear { right: max(10px, env(safe-area-inset-right)); }
+    #chatvault_panel .cv-reader-headinfo { gap: 10px; padding: 2px 2px 14px; margin-bottom: 14px; }
+    #chatvault_panel .cv-reader-headinfo-avatar { width: 34px; height: 34px; }
+    #chatvault_panel .cv-reader-headinfo-title { font-size: 14px; }
+    #chatvault_panel .cv-reader-headinfo-meta { display: none; }
+
+    #chatvault_panel .cv-reader-list { gap: 10px; }
+    #chatvault_panel .cv-reader-msg { padding: 12px 13px; border-radius: 14px; }
+    #chatvault_panel .cv-reader-msg-body {
+        /* 手机上行高略收，1.85 在窄栏里太散 */
+        line-height: var(--cv-reader-line-height, 1.85);
+        overflow-wrap: break-word;
+    }
+    /* 楼层号 #N 是阅读模式里唯一的书签/跳转入口 → 手机上加到 40px 命中面 */
+    .cv-reader-msg-floor {
+        min-height: 40px;
+        min-width: 46px;
+        justify-content: center;
+        padding: 4px 9px;
+    }
+    /* 阅读设置抽屉里的小图标按钮：18px / 30px 在触屏上点不中 */
+    .cv-info-btn { width: 40px; height: 40px; font-size: 14px; }
+    .cv-bm-edit, .cv-bm-del { width: 40px; height: 40px; padding: 0; }
+    .cv-bm-del { margin-left: 0; }
+    .cv-bm-item { min-height: 48px; }
+    .cv-bm-jump { min-height: 48px; }
+    #chatvault_panel .cv-reader-bottom-spacer { height: calc(112px + env(safe-area-inset-bottom)); }
+
+    /* 分页器：更大、避开手势条 */
+    #chatvault_panel .cv-reader-pager-wrap {
+        bottom: calc(10px + env(safe-area-inset-bottom));
+    }
+    #chatvault_panel .cv-reader-pager {
+        gap: 2px;
+        padding: 5px 8px;
+        max-width: calc(100% - 20px);
+    }
+    #chatvault_panel .cv-pager-btn {
+        min-width: 40px;
+        height: 40px;
+        padding: 0 6px !important;
+    }
+    #chatvault_panel .cv-pager-btn svg { width: 16px; height: 16px; }
+    #chatvault_panel .cv-pager-page { font-size: 12.5px; gap: 4px; padding: 0 2px; }
+    #chatvault_panel .cv-pager-page input {
+        width: 52px;
+        height: 38px;
+        font-size: 16px !important;   /* iOS 不放大 */
+        border-radius: 9px;
+    }
+    #chatvault_panel .cv-pager-go {
+        height: 40px;
+        padding: 0 12px !important;
+        font-size: 13px;
+    }
+
+    /* 阅读设置面板 → 底部抽屉（原来是右上角浮窗） */
+    #chatvault_panel.cv-in-reader .cv-body > .cv-reader-settings {
+        left: max(8px, env(safe-area-inset-left)) !important;
+        right: max(8px, env(safe-area-inset-right)) !important;
+        top: auto !important;
+        bottom: calc(8px + env(safe-area-inset-bottom)) !important;
+        width: auto !important;
+        max-height: 74% !important;
+        border-radius: 18px !important;
+        box-shadow: 0 -10px 34px rgba(0, 0, 0, 0.36) !important;
+    }
+    #chatvault_panel .cv-reader-settings-header {
+        padding: 12px 10px 10px 16px;
+        border-radius: 18px 18px 0 0;
+        position: relative;
+    }
+    #chatvault_panel .cv-reader-settings-header::before {
+        content: '';
+        position: absolute;
+        top: 5px;
+        left: 50%;
+        width: 38px;
+        height: 4px;
+        margin-left: -19px;
+        border-radius: 2px;
+        background: var(--cv-border);
+        opacity: .85;
+    }
+    #chatvault_panel .cv-reader-settings-title { font-size: 14px; padding-top: 4px; }
+    #chatvault_panel .cv-reader-settings-close {
+        width: 44px;
+        height: 44px;
+        font-size: 20px;
+        margin-top: 2px;
+    }
+    #chatvault_panel .cv-reader-settings-body {
+        padding: 12px 14px calc(6px + env(safe-area-inset-bottom));
+        gap: 10px;
+        overscroll-behavior: contain;
+    }
+    /* 设置抽屉打开时压暗正文：抽屉才有“浮上来”的层次（手机没有遮罩可铺） */
+    #chatvault_panel.cv-reader-settings-open .cv-reader-stage {
+        filter: brightness(.68) saturate(.92);
+        transition: filter .18s ease;
+    }
+    #chatvault_panel .cv-reader-settings-hint { font-size: 11px; }
+    /* 滑块：加粗轨道 + 大圆点，拇指才好拖 */
+    #chatvault_panel .cv-reader-settings input[type="range"] {
+        height: 30px;
+        accent-color: var(--cv-accent, #6e8efb);
+    }
+    /* 单选卡片（分页器模式 / 排版）纵向排列，每项 ≥46px */
+    #chatvault_panel .cv-reader-style-row { flex-direction: column; gap: 8px; }
+    #chatvault_panel .cv-reader-style-opt { min-height: 52px; padding: 10px 12px; }
+    #chatvault_panel .cv-reader-settings .cv-switch-row { min-height: 46px; }
+
+    /* ============================================================
+     * 5. 楼层整理器 / 消息菜单 / 预览气泡
+     * ============================================================ */
+    #chatvault_panel .cv-organizer-head {
+        flex-direction: column;
+        gap: 2px;
+        padding: 8px 10px;
+    }
+    #chatvault_panel .cv-organizer-help-row { margin: 6px 0 8px; }
+    #chatvault_panel .cv-organizer-help-toggle { width: 34px; height: 34px; }
+    #chatvault_panel .cv-organizer-range,
+    #chatvault_panel .cv-organizer-toolbar { gap: 6px; }
+    #chatvault_panel .cv-organizer-range input,
+    #chatvault_panel .cv-organizer-move-target input,
+    #chatvault_panel .cv-organizer-page-input {
+        width: 76px;
+        height: 44px;
+        font-size: 16px !important;   /* iOS 不放大 */
+        border-radius: 9px;
+    }
+    #chatvault_panel .cv-organizer-toolbar .cv-btn,
+    #chatvault_panel .cv-organizer-range .cv-btn,
+    #chatvault_panel .cv-organizer-page-btn {
+        min-height: 42px;
+        padding: 6px 10px !important;
+        font-size: 12.5px;
+        flex: 1 1 calc(50% - 6px);
+    }
+    /* 单行布局：勾选 / #号 / 说话人 / 预览按钮 */
+    #chatvault_panel .cv-organizer-list {
+        max-height: 42dvh;
+        overscroll-behavior: contain;
+    }
+    #chatvault_panel .cv-organizer-row {
+        grid-template-columns: 34px 46px minmax(0, 1fr) auto;
+        grid-template-areas: "check index speaker preview";
+        gap: 2px 8px;
+        min-height: 58px;
+        padding: 8px;
+    }
+    #chatvault_panel .cv-organizer-check { grid-area: check; }
+    #chatvault_panel .cv-organizer-check input { width: 22px; height: 22px; }
+    #chatvault_panel .cv-organizer-index { grid-area: index; }
+    #chatvault_panel .cv-organizer-speaker { grid-area: speaker; min-width: 0; }
+    #chatvault_panel .cv-organizer-preview {
+        grid-area: preview;
+        width: auto;
+        max-width: 84px;
+        min-height: 40px;
+        padding: 6px 8px;
+        border: 1px solid color-mix(in srgb, var(--cv-accent) 42%, var(--cv-border));
+        border-radius: 10px;
+        background: var(--cv-accent-muted);
+        color: var(--cv-accent);
+        text-align: center;
+        white-space: nowrap;
+        line-height: 1.3;
+    }
+    #chatvault_panel .cv-organizer-preview-text { display: none; }
+    #chatvault_panel .cv-organizer-preview-action { display: inline; }
+    #chatvault_panel .cv-organizer-pager {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+        padding: 8px;
+    }
+    #chatvault_panel .cv-organizer-pager-main { justify-content: center; }
+    #chatvault_panel .cv-organizer-move-target { width: 100%; justify-content: center; }
+    #chatvault_panel #cv_org_actions { flex-wrap: wrap; gap: 8px; }
+    #chatvault_panel .cv-organizer-skip-backup {
+        flex: 1 1 100%;
+        min-height: 40px;
+        margin-right: 0;
+        align-items: center;
+    }
+    #chatvault_panel .cv-organizer-skip-backup input { width: 20px; height: 20px; }
+    /* 关闭 / 备份原文件 / 保存更改 三颗按钮压成一行，给楼层列表腾出高度 */
+    #chatvault_panel #cv_org_actions .cv-btn {
+        flex: 1 1 0;
+        min-width: 0;
+        font-size: 13px;
+        padding: 0 6px !important;
+    }
+
+    /* 阅读模式里点楼层号弹出的菜单：手机改成底部动作面板 */
+    .cv-msg-menu {
+        left: max(8px, env(safe-area-inset-left)) !important;
+        right: max(8px, env(safe-area-inset-right)) !important;
+        top: auto !important;
+        bottom: calc(8px + env(safe-area-inset-bottom)) !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        border-radius: 16px !important;
+        padding: 6px !important;
+        box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.4) !important;
+    }
+    .cv-msg-menu button {
+        min-height: 52px;
+        padding: 12px 14px !important;
+        font-size: 15px !important;
+        border-radius: 10px !important;
+    }
+
+    /* 长按预览气泡：同样落到底部，避免遮住整页 */
+    .cv-preview-tip {
+        left: max(8px, env(safe-area-inset-left)) !important;
+        right: max(8px, env(safe-area-inset-right)) !important;
+        top: auto !important;
+        bottom: calc(8px + env(safe-area-inset-bottom)) !important;
+        max-width: none !important;
+        max-height: 58dvh !important;
+        padding: 12px 14px;
+        font-size: 14px;
+        line-height: 1.65;
+        border-radius: 16px;
+        box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.4);
+        overscroll-behavior: contain;
+    }
+
+    /* ============================================================
+     * 6. 扩展设置页（酒馆自带的 Extensions 抽屉里）
+     * ============================================================ */
+    #chatvault_settings .cv-settings-row { gap: 8px; align-items: flex-start; }
+    #chatvault_settings .cv-settings-row select { font-size: 16px; min-height: 42px; }
+    #chatvault_settings .cv-font-row { padding: 10px; }
+    #chatvault_settings .cv-font-btn { width: 40px; height: 40px; }
+    #chatvault_settings .cv-font-input,
+    #chatvault_settings .cv-settings-row input[type="text"],
+    #chatvault_settings .cv-settings-row input[type="number"] { font-size: 16px; min-height: 42px; }
+    #chatvault_settings .cv-color-row { flex-wrap: wrap; padding: 8px; row-gap: 8px; }
+    #chatvault_settings .cv-color-row input[type="color"] { width: 52px; height: 40px; }
+    #chatvault_settings .cv-color-row input[type="range"] { width: 100%; flex: 1 1 140px; height: 30px; }
+    #chatvault_settings .cv-cc-clear { width: 40px; height: 40px; }
+    #chatvault_settings .cv-cc-hex { width: 96px; font-size: 16px; min-height: 40px; }
+    #chatvault_settings .cv-cre-toggle,
+    #chatvault_settings .cv-cre-del { width: 40px; height: 40px; }
+    #chatvault_settings .menu_button,
+    #chatvault_settings .cv-btn { min-height: 40px; }
+
+    /* 找不到 #extensionsMenu 时插件会退化成右下角固定小按钮，这里补安全区 */
+    #chatvault_open_btn[style*="position:fixed"],
+    #chatvault_open_btn[style*="position: fixed"] {
+        right: 12px !important;
+        bottom: calc(16px + env(safe-area-inset-bottom)) !important;
+        padding: 10px 14px !important;
+        font-size: 14px;
+    }
+
+    /* ---------- 8. 审校修复（v0.6.0 第二轮） ---------- */
+
+    /* 8.1 阅读分页器：360px 宽下 4 个方向键 + 页码 + 跳转 ≈ 356px，会撑出面板被裁掉 */
+    #chatvault_panel .cv-reader-pager {
+        max-width: calc(100% - 16px);
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    #chatvault_panel .cv-reader-pager::-webkit-scrollbar { display: none; }
+    #chatvault_panel .cv-reader-bottom-spacer { height: calc(96px + env(safe-area-inset-bottom)); }
+
+    /* 8.2 两个浮层改成面板内绝对定位：面板已经跟随视觉视口（--cv-vv-h），
+       fixed 只会跟布局视口 → iOS 横屏/键盘弹出时贴不住屏幕底部 */
+    .cv-msg-menu,
+    .cv-preview-tip { position: absolute !important; }
+
+    /* 8.3 预览气泡高度用“面板百分比”，键盘弹出时面板变矮它才跟着变矮 */
+    .cv-preview-tip { max-height: 60% !important; }
+
+    /* 8.4 阅读设置抽屉：外层已经留过底部安全区，内层不要再加一次（否则底部多 34px 死区） */
+    #chatvault_panel .cv-reader-settings-body {
+        padding: 12px 14px 6px;
+    }
+
+    /* 8.5 persona 头像网格：抽屉内的第二个滚动容器，锁住滚动链 */
+    #chatvault_panel .cv-ua-grid {
+        overscroll-behavior: contain;
+        max-height: min(220px, 32vh);
+    }
+
+    /* 8.6 摘取规则弹窗里的启用/删除按钮之前只在设置页里放大了，弹窗里仍是 26px */
+    #chatvault_panel .cv-cre-toggle,
+    #chatvault_panel .cv-cre-del {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        font-size: 16px;
+    }
+    #chatvault_panel #cv_org_help { width: 40px; height: 40px; }
+    #chatvault_panel .cv-export-rules > summary { min-height: 44px; }
+
+    /* 8.7 楼层整理器：把列表变成“占满剩余高度”的弹性区
+       （原来 42dvh 在手机上只显示 2~3 行，横屏更惨）
+       为了让 flex 生效，抽屉必须给定高度（max-height 不够，body 的 flex 没有参照）。 */
+    #chatvault_panel .cv-organizer-modal { height: 92% !important; }
+    #chatvault_panel #cv_org_body {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        /* 用 auto 而不是 hidden：极小屏上工具条撑满时整块可以滚，绝不裁切 */
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+    #chatvault_panel #cv_org_body > .cv-organizer-list {
+        flex: 1 1 auto;
+        min-height: 120px;
+        max-height: none;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    /* 8.8 列表分页药丸：别被 width:100% 撑成一条横杠 */
+    #chatvault_panel .cv-pagination.cv-pagination-autohide {
+        width: auto;
+        max-width: calc(100% - 24px);
+        bottom: calc(10px + env(safe-area-inset-bottom));
+    }
+
+    /* 8.9 元信息/标签字号：10.5~11.5px 的中文在手机上掉笔画 */
+    #chatvault_panel .cv-meta-row { font-size: 12px; }
+    #chatvault_panel .cv-tag { font-size: 12px; }
+    #chatvault_panel .cv-character { font-size: 12px; }
+    #chatvault_panel .cv-preview { font-size: 13px; }
+
+    /* 8.10 抽屉标题避让 44px 关闭键 */
+    #chatvault_panel .cv-modal h3 { padding-right: 48px; }
+
+    /* 8.11 抽屉把手与标题/关闭键对齐 */
+    #chatvault_panel .cv-reader-settings-header { padding-top: 16px; }
+    #chatvault_panel .cv-reader-settings-header::before { top: 5px; }
+    #chatvault_panel .cv-reader-settings-close { margin-top: 2px; }
+
+    /* 8.12 正文里的宽表格/代码块：横向滚到底后不要把纵向滚动带走 */
+    #chatvault_panel .cv-reader-msg-body .cv-md-table,
+    #chatvault_panel .cv-reader-msg-body .cv-md-pre {
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+    #chatvault_panel .cv-reader-msg-body .cv-md-table { font-size: .9em; }
+
+    /* 8.13 扩展设置页：PC 专属控件在手机上隐藏 */
+    #chatvault_settings .cv-pc-only { display: none !important; }
+
+    /* 8.14 输入框 16px 统一兜底（新增输入框也不会再触发 iOS 聚焦放大） */
+    #chatvault_panel input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+    #chatvault_panel select,
+    #chatvault_panel textarea,
+    #chatvault_settings input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+    #chatvault_settings select {
+        font-size: 16px;
+    }
+}
+
+/* ============================================================
+ * 7. 横屏手机专项（844x390 这类：宽 >720 但高度很矮）
+ *    - 桌面专属控件（拖动/拉伸把手）必须关掉
+ *    - 竖向空间宝贵：Header 收成一行、抽屉更矮
+ * ============================================================ */
+@media (orientation: landscape) and (max-height: 560px) {
+    #chatvault_panel .cv-resize-handle,
+    #chatvault_panel .cv-drag-strip { display: none !important; }
+    /* 左侧停靠入口在手机上不出现（JS 也已跳过注入，这里是双保险） */
+    #chatvault_dock_tab { display: none !important; }
+
+    #chatvault_overlay.cv-mode-dock,
+    #chatvault_overlay.cv-window-positioned,
+    #chatvault_overlay.cv-window-free {
+        align-items: stretch !important;
+        justify-content: stretch !important;
+        background: var(--cv-bg-overlay) !important;
+        pointer-events: auto !important;
+    }
+    #chatvault_overlay.cv-window-positioned #chatvault_panel {
+        position: relative !important;
+        transform: none !important;
+    }
+
+    /* Header 单行：标题 | 搜索 | 按钮 */
+    #chatvault_panel .cv-header {
+        flex-wrap: nowrap !important;
+        padding: 6px 10px !important;
+        padding-top: max(6px, env(safe-area-inset-top)) !important;
+        padding-left: max(10px, env(safe-area-inset-left)) !important;
+        padding-right: max(10px, env(safe-area-inset-right)) !important;
+        gap: 8px !important;
+    }
+    #chatvault_panel .cv-header h1 { font-size: 15px !important; }
+    #chatvault_panel .cv-search-wrap {
+        order: 0;
+        flex: 1 1 auto;
+        margin: 0 !important;
+    }
+    #chatvault_panel .cv-search { height: 38px; }
+    #chatvault_panel .cv-icon-btn { width: 40px; height: 40px; }
+    #chatvault_panel .cv-tabbar { padding: 2px 8px 0 !important; }
+    #chatvault_panel .cv-tab { min-height: 42px; padding: 4px 2px !important; }
+    #chatvault_panel .cv-tab .cv-tab-count { display: none; }
+    /* 横屏同样要能看到状态提示（删除成功/失败只写在这里，藏起来等于没提示） */
+    #chatvault_panel .cv-status {
+        display: block;
+        max-height: 18px;
+        overflow: hidden;
+        padding: 0 10px 2px !important;
+        font-size: 10.5px;
+        line-height: 18px;
+    }
+    #chatvault_panel:not(.cv-in-reader) .cv-body { padding-bottom: calc(58px + env(safe-area-inset-bottom)) !important; }
+
+    #chatvault_panel .cv-modal,
+    #chatvault_panel .cv-modal.cv-modal-wide,
+    #chatvault_panel .cv-organizer-modal { max-height: 94% !important; }
+    #chatvault_panel .cv-modal h3 { margin: 2px 0 8px !important; }
+
+    /* 整理器专项：横屏只有 390px 高，单列布局无论怎么压缩都放不下
+       “工具条 + 楼层列表”，于是改成左右两列：左边控制区，右边楼层列表。 */
+    #chatvault_panel .cv-organizer-modal {
+        height: 100% !important;
+        max-height: 100% !important;
+        border-radius: 0 !important;
+        padding: 10px 12px calc(8px + env(safe-area-inset-bottom)) !important;
+    }
+    #chatvault_panel .cv-organizer-modal h3 {
+        display: block;
+        font-size: 14px !important;
+        margin: 0 0 6px !important;
+    }
+    #chatvault_panel .cv-organizer-head {
+        flex-direction: row;
+        align-items: center;
+        gap: 10px;
+        padding: 4px 46px 4px 8px;      /* 右侧给 44px 关闭键让位 */
+    }
+    #chatvault_panel .cv-organizer-help-row { display: none; }
+    #chatvault_panel .cv-organizer-range { flex-wrap: nowrap; gap: 6px; margin-bottom: 6px; }
+    #chatvault_panel .cv-organizer-range .cv-btn,
+    #chatvault_panel .cv-organizer-toolbar .cv-btn,
+    #chatvault_panel .cv-organizer-page-btn {
+        flex: 0 0 auto;
+        padding: 0 9px !important;
+        min-height: 40px;
+    }
+    #chatvault_panel .cv-organizer-toolbar { flex-wrap: nowrap; gap: 6px; margin-bottom: 6px; }
+    #chatvault_panel .cv-organizer-move-target input { width: 58px; }
+    #chatvault_panel .cv-organizer-selection { display: none; }
+    #chatvault_panel .cv-organizer-pager { flex-direction: row; align-items: center; padding: 6px 8px; margin-top: 6px; }
+    #chatvault_panel .cv-organizer-move-target { width: auto; justify-content: flex-start; }
+
+    /* 右列用绝对定位铺满“除工具条外的右侧”（grid 的跨行会按内容撑高每一行，
+       把左侧控件挤到屏幕外，所以这里用定位实现真正的两栏）。 */
+    #chatvault_panel #cv_org_body {
+        position: relative;
+        display: block;
+        overflow: hidden;
+        padding-right: calc(58% + 12px) !important;
+    }
+    #chatvault_panel #cv_org_body > .cv-organizer-list {
+        position: absolute;
+        left: calc(42% + 6px);
+        right: 0;
+        top: 0;
+        bottom: 46px;
+        max-height: none;
+        min-height: 0;
+        overflow-y: auto;
+    }
+    #chatvault_panel #cv_org_body > .cv-organizer-pager {
+        position: absolute;
+        left: calc(42% + 6px);
+        right: 0;
+        bottom: 0;
+        margin: 0;
+    }
+    #chatvault_panel .cv-organizer-pager-info { display: none; }
+    #chatvault_panel .cv-organizer-pager-main { flex-wrap: nowrap; gap: 3px; }
+    #chatvault_panel .cv-organizer-page-btn { padding: 0 5px !important; font-size: 11px; }
+    #chatvault_panel .cv-organizer-page-input { width: 40px; }
+    #chatvault_panel.cv-in-reader .cv-body > .cv-reader-settings { max-height: 88% !important; }
+
+    #chatvault_panel .cv-reader-column { padding-top: 46px !important; }
+    #chatvault_panel .cv-reader-fab { width: 40px; height: 40px; top: max(6px, env(safe-area-inset-top)); }
+    #chatvault_panel .cv-reader-bottom-spacer { height: calc(84px + env(safe-area-inset-bottom)); }
+    #chatvault_panel .cv-reader-pager-wrap { bottom: calc(6px + env(safe-area-inset-bottom)); }
+}
+
+/* 极窄屏（iPhone SE 1st / 老安卓 320px）：卡片操作按钮换到第二行，标题不再被挤爆 */
+@media (max-width: 360px) {
+    #chatvault_panel .cv-card-row { flex-wrap: wrap; row-gap: 2px; }
+    #chatvault_panel .cv-card-titleblock { flex: 1 1 100%; min-width: 0; }
+    #chatvault_panel .cv-actions {
+        width: 100%;
+        justify-content: flex-end;
+        margin: 0;
+    }
+    #chatvault_panel .cv-act { min-width: 40px; min-height: 40px; }
+    #chatvault_panel .cv-tab { font-size: 12.5px !important; }
+    #chatvault_panel .cv-modal { padding-left: 12px !important; padding-right: 12px !important; }
+    #chatvault_panel .cv-pager-page { font-size: 12px; }
+    #chatvault_panel .cv-pager-page input { width: 46px; }
+    #chatvault_panel .cv-pager-go { padding: 0 9px !important; }
+}
+
+/* 小屏手机（≤400px）：阅读分页器放不下 4 个方向键 + 页码 + 跳转，
+   先/末页按钮让位（左右滑动与「上一页/下一页」仍然可用） */
+@media (max-width: 400px) {
+    #chatvault_panel .cv-pager-btn[data-go="first"],
+    #chatvault_panel .cv-pager-btn[data-go="last"] { display: none; }
+    #chatvault_panel .cv-pager-page { margin: 0 2px; }
+}
+
+/* 小屏手机（≤380px）楼层整理器：竖屏高度本来就少，
+   把「整理说明」入口和选择提示收起、选择行压成一行，给楼层列表腾出可见高度 */
+@media (max-width: 380px) {
+    #chatvault_panel .cv-organizer-help-row { display: none; }
+    #chatvault_panel .cv-organizer-selection { display: none; }
+    #chatvault_panel .cv-organizer-range { flex-wrap: nowrap; gap: 5px; }
+    #chatvault_panel .cv-organizer-range .cv-btn {
+        flex: 0 0 auto;
+        padding: 0 8px !important;
+    }
+    #chatvault_panel .cv-organizer-range input { width: 62px; }
+    #chatvault_panel .cv-organizer-toolbar .cv-btn {
+        flex: 0 0 auto;
+        padding: 0 8px !important;
+        min-height: 40px;
+    }
+    #chatvault_panel .cv-organizer-head { padding: 6px 8px; }
+}
+
+/* ============================================================
+ * 全局兜底
+ * ============================================================ */
+
+/* 历史上有 4 处 "class 的 display:flex 顶掉 [hidden]" 的补丁，这里统一兜住，
+   以后新增可折叠块不用再补一条 */
+#chatvault_panel [hidden] { display: none !important; }
+
+/* 键盘 / 读屏用户的焦点提示（原来只有搜索框有阴影） */
+#chatvault_panel :focus-visible,
+#chatvault_settings :focus-visible {
+    outline: 2px solid var(--cv-accent, #34d399);
+    outline-offset: 2px;
+}
+
+/* 尊重系统「减少动态效果」设置 */
+@media (prefers-reduced-motion: reduce) {
+    #chatvault_panel *,
+    #chatvault_overlay * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
